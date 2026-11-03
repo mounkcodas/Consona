@@ -1,0 +1,18 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "playmusic-library-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-03",
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 },
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "playmusic-library" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "playmusic-library",
+      "database_id": "1c0bb804-1d5c-4b0b-a07e-8e986ac52aaa",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
