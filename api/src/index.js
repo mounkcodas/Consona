@@ -50,8 +50,10 @@ async function getLibrary(request, env) {
     tracks: trackRows.results.map(track => ({
       id: track.id, title: track.title, artist: track.artist, album: track.album,
       duration: formatTime(track.duration_seconds), seconds: track.duration_seconds,
-      src: mediaUrl(request, track.audio_key), cover: mediaUrl(request, track.cover_key),
-      mainArt: mediaUrl(request, track.main_key),
+      src: mediaUrl(request, track.audio_key),
+      mainArt: mediaUrl(request, track.main_key) || parseMetadata(track.metadata_json).mainImageUrl || '',
+      cover: mediaUrl(request, track.cover_key) || parseMetadata(track.metadata_json).coverUrl || '',
+      metadata: parseMetadata(track.metadata_json),
     })),
     playlists: playlistRows.results.map(list => ({
       id: list.id, name: list.name, trackIds: itemsByPlaylist.get(list.id) || [],
@@ -60,6 +62,10 @@ async function getLibrary(request, env) {
     favorites: favoriteRows.results.map(row => row.track_id),
     history: historyRows.results.map(row => row.track_id),
   });
+}
+
+function parseMetadata(value) {
+  try { const data = JSON.parse(value || '{}'); return data && typeof data === 'object' && !Array.isArray(data) ? data : {}; } catch { return {}; }
 }
 
 function formatTime(seconds) {
@@ -78,6 +84,13 @@ async function uploadTrack(request, env) {
   const audio = form.get('audio');
   const cover = form.get('cover');
   const mainImage = form.get('mainImage');
+  const coverUrl = safeRemoteImage(form.get('coverUrl'));
+  const mainImageUrl = safeRemoteImage(form.get('mainImageUrl'));
+  let metadata = {};
+  try { metadata = JSON.parse(String(form.get('metadata') || '{}')); } catch { return fail(request, 'Metadados inválidos.'); }
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || JSON.stringify(metadata).length > 24000) return fail(request, 'Metadados inválidos ou muito extensos.');
+  metadata.coverUrl = coverUrl;
+  metadata.mainImageUrl = mainImageUrl;
   if (!title || !artist || !album || !(audio instanceof File)) return fail(request, 'Informe música, artista, álbum e arquivo de áudio.');
   if (audio.size < 1 || audio.size > 32 * 1024 * 1024) return fail(request, 'O áudio deve ter até 32 MB.', 413);
   if (!(audio.type.startsWith('audio/') || /\.(mp3|m4a|aac|wav|ogg|flac|opus)$/i.test(audio.name))) return fail(request, 'O arquivo enviado não parece ser um áudio.');
@@ -94,13 +107,20 @@ async function uploadTrack(request, env) {
     await env.MEDIA.put(audioKey, audio.stream(), { httpMetadata: { contentType: audio.type || 'application/octet-stream', cacheControl: 'public, max-age=31536000, immutable' } });
     if (coverKey && cover instanceof File) await env.MEDIA.put(coverKey, cover.stream(), { httpMetadata: { contentType: cover.type, cacheControl: 'public, max-age=31536000, immutable' } });
     if (mainKey && mainImage instanceof File) await env.MEDIA.put(mainKey, mainImage.stream(), { httpMetadata: { contentType: mainImage.type, cacheControl: 'public, max-age=31536000, immutable' } });
-    await env.DB.prepare('INSERT INTO tracks (id, title, artist, album, duration_seconds, audio_key, cover_key, main_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .bind(id, title, artist, album, duration, audioKey, coverKey, mainKey).run();
+    await env.DB.prepare('INSERT INTO tracks (id, title, artist, album, duration_seconds, audio_key, cover_key, main_key, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(id, title, artist, album, duration, audioKey, coverKey, mainKey, JSON.stringify(metadata)).run();
   } catch (error) {
     await Promise.all([audioKey, coverKey, mainKey].filter(Boolean).map(key => env.MEDIA.delete(key)));
     throw error;
   }
   return json(request, { id }, 201);
+}
+
+function safeRemoteImage(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' && url.hostname === 'upload.wikimedia.org' ? url.href.slice(0, 2000) : '';
+  } catch { return ''; }
 }
 
 function safeName(name) {
