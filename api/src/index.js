@@ -1,5 +1,6 @@
 const allowedOrigins = new Set([
   'https://mounkcodas.github.io',
+  'https://obgmusicplayer.aleixomaycon.workers.dev',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ]);
