@@ -124,7 +124,7 @@ async function uploadTrack(request, env) {
 function safeRemoteImage(value) {
   try {
     const url = new URL(String(value || ''));
-    return url.protocol === 'https:' && url.hostname === 'upload.wikimedia.org' ? url.href.slice(0, 2000) : '';
+    return url.protocol === 'https:' && ['upload.wikimedia.org', 'coverartarchive.org'].includes(url.hostname) ? url.href.slice(0, 2000) : '';
   } catch { return ''; }
 }
 
@@ -178,6 +178,19 @@ async function createAlbum(request, env) {
   return json(request,{id,title,artist,trackIds,cover:coverUrl},201);
 }
 
+async function updateAlbum(request, env, id) {
+  const payload = await request.json();
+  const current = await env.DB.prepare('SELECT * FROM albums WHERE id=?').bind(id).first();
+  if (!current) return fail(request, 'Álbum não encontrado.', 404);
+  const title = String(payload.title ?? current.title).trim().slice(0,180);
+  const artist = String(payload.artist ?? current.artist).trim().slice(0,180);
+  const coverUrl = payload.coverUrl === undefined ? current.cover_url : safeRemoteImage(payload.coverUrl);
+  const metadata = payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? JSON.stringify(payload.metadata).slice(0,12000) : current.metadata_json;
+  if (!title) return fail(request, 'Informe o nome do álbum.');
+  await env.DB.prepare('UPDATE albums SET title=?,artist=?,cover_url=?,metadata_json=? WHERE id=?').bind(title,artist,coverUrl,metadata,id).run();
+  return json(request,{ok:true});
+}
+
 async function route(request, env) {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -190,6 +203,7 @@ async function route(request, env) {
   if (path === '/api/playlists' && request.method === 'POST') return createPlaylist(request, env);
   if (path === '/api/albums' && request.method === 'POST') return createAlbum(request, env);
   const albumMatch=path.match(/^\/api\/albums\/([^/]+)$/);
+  if(albumMatch&&request.method==='PUT') return updateAlbum(request,env,albumMatch[1]);
   if(albumMatch&&request.method==='DELETE') { await env.DB.prepare('DELETE FROM album_tracks WHERE album_id=?').bind(albumMatch[1]).run(); await env.DB.prepare('DELETE FROM albums WHERE id=?').bind(albumMatch[1]).run(); return json(request,{ok:true}); }
   const albumTracksMatch=path.match(/^\/api\/albums\/([^/]+)\/tracks$/);
   if(albumTracksMatch&&request.method==='POST') { const payload=await request.json(); const trackIds=Array.isArray(payload.trackIds)?[...new Set(payload.trackIds.map(String))].slice(0,500):[]; await env.DB.prepare('DELETE FROM album_tracks WHERE album_id=?').bind(albumTracksMatch[1]).run(); const statements=trackIds.map((id,position)=>env.DB.prepare('INSERT OR IGNORE INTO album_tracks (album_id,track_id,position) SELECT ?,id,? FROM tracks WHERE id=?').bind(albumTracksMatch[1],position,id)); if(statements.length) await env.DB.batch(statements); return json(request,{ok:true,trackIds}); }
