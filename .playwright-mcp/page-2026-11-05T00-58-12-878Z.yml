@@ -1,0 +1,91 @@
+- generic [ref=f12e3]:
+  - banner [ref=f12e4]:
+    - button "Consona" [ref=f12e5] [cursor=pointer]
+    - navigation [ref=f12e8]:
+      - button "Início" [ref=f12e9] [cursor=pointer]
+      - button "Explorar" [ref=f12e13] [cursor=pointer]
+      - button "Biblioteca" [ref=f12e17] [cursor=pointer]
+      - button "Playlists" [ref=f12e20] [cursor=pointer]
+      - button "Favoritos" [ref=f12e23] [cursor=pointer]
+      - button "Histórico" [ref=f12e26] [cursor=pointer]
+      - button "Álbuns" [ref=f12e30] [cursor=pointer]
+      - button "Configurações" [ref=f12e36] [cursor=pointer]
+    - generic [ref=f12e40]:
+      - button "Minimizar" [ref=f12e41]: −
+      - button "Maximizar" [ref=f12e42]: □
+      - button "Fechar" [ref=f12e43]: ×
+  - main [ref=f12e44]:
+    - generic [ref=f12e45]:
+      - complementary [ref=f12e46]:
+        - generic [ref=f12e47]: Minha música
+        - button "Reproduzindo" [ref=f12e48] [cursor=pointer]
+        - button "Explorar" [ref=f12e51] [cursor=pointer]
+        - button "Biblioteca" [ref=f12e55] [cursor=pointer]
+        - button "Playlists" [ref=f12e58] [cursor=pointer]
+        - button "Favoritos" [ref=f12e61] [cursor=pointer]
+        - button "Histórico" [ref=f12e64] [cursor=pointer]
+        - button "Álbuns" [ref=f12e68] [cursor=pointer]
+        - generic [ref=f12e74]:
+          - generic [ref=f12e80]: Coleção pessoal
+          - generic [ref=f12e81]: "0"
+      - generic [ref=f12e82]:
+        - generic [ref=f12e83]:
+          - strong [ref=f12e88]: Sua música começa aqui
+          - generic [ref=f12e89]: Adicione suas músicas em Configurações
+        - generic [ref=f12e92]:
+          - heading "Sua música começa aqui" [level=1] [ref=f12e99]
+          - paragraph [ref=f12e100]: Suas músicas e imagens aparecem aqui depois que você as adicionar.
+          - button "Adicionar primeira música" [ref=f12e101] [cursor=pointer]
+        - generic [ref=f12e105]: 00:00 / 00:00
+        - generic [ref=f12e113]:
+          - generic [ref=f12e114]:
+            - button "Anterior" [disabled] [ref=f12e115]
+            - button "Reproduzir" [disabled] [ref=f12e118]
+            - button "Próxima" [disabled] [ref=f12e121]
+            - button "Parar" [disabled] [ref=f12e124]
+            - button "Aleatório" [disabled] [ref=f12e127]
+          - slider "Volume" [ref=f12e139] [cursor=pointer]: "64"
+          - generic [ref=f12e140]:
+            - slider "Posição da música" [disabled] [ref=f12e141] [cursor=pointer]: "0"
+            - button "Repetir" [ref=f12e142] [cursor=pointer]
+          - button "Tela cheia" [ref=f12e148] [cursor=pointer]
+      - complementary [ref=f12e154]:
+        - generic [ref=f12e155]: Informações da Música
+        - generic [ref=f12e158]: Nenhuma músicaselecionada
+    - generic [ref=f12e165]: ⊞
+  - generic [ref=f12e167]:
+    - article [ref=f12e168]:
+      - generic [ref=f12e169]:
+        - heading "Fila de Reprodução" [level=3] [ref=f12e173]
+        - generic [ref=f12e174]: 0 faixas
+      - generic [ref=f12e175]:
+        - textbox "Buscar músicas..." [ref=f12e180]
+        - button "Adicionar música" [ref=f12e181] [cursor=pointer]
+      - generic [ref=f12e184]: Adicione músicas em Configurações para preencher sua biblioteca.
+    - article [ref=f12e185]:
+      - generic [ref=f12e186]:
+        - generic [ref=f12e187]: ✦
+        - heading "Suas Playlists" [level=3] [ref=f12e188]
+        - generic [ref=f12e189]:
+          - button "Playlists anteriores" [disabled] [ref=f12e190]
+          - button "Próximas playlists" [disabled] [ref=f12e193]
+      - generic [ref=f12e196]:
+        - generic [ref=f12e199]: Suas playlists criadas aparecerão aqui.
+        - button "Criar playlist" [ref=f12e200] [cursor=pointer]
+    - article [ref=f12e202]:
+      - generic [ref=f12e203]:
+        - heading "Artistas recomendados" [level=3] [ref=f12e206]
+        - button "Configurar Last.fm" [ref=f12e207] [cursor=pointer]
+      - generic [ref=f12e211]:
+        - text: Adicione uma chave de API do Last.fm nas Configurações para ver recomendações a partir da música atual.
+        - button "Configurar Last.fm" [ref=f12e212] [cursor=pointer]
+  - contentinfo [ref=f12e213]:
+    - generic [ref=f12e214]: Consona
+    - generic [ref=f12e216]:
+      - button "Faixa anterior" [disabled] [ref=f12e217]
+      - button "Reproduzir" [disabled] [ref=f12e220]
+      - button "Pr?xima faixa" [disabled] [ref=f12e223]
+    - generic [ref=f12e226]: Nenhuma música adicionada
+    - slider "Posi??o da m?sica" [disabled] [ref=f12e228]: "0"
+    - generic [ref=f12e229]: 00:00 / 00:00
+    - generic [ref=f12e230]: 21:58

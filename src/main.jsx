@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { parseBlob } from 'music-metadata-browser';
 import { createRoot } from 'react-dom/client';
 import { AudioLines, ChevronDown, ChevronLeft, ChevronRight, Clock3, Disc3, Expand, Heart, Home, Library, ListMusic, Music2, Pause, Play, Plus, Repeat2, Search, Settings, Shuffle, SkipBack, SkipForward, Square, Volume2, X, ExternalLink } from 'lucide-react';
 import './styles.css';
@@ -15,6 +14,54 @@ const sections = [
   { label: 'Favoritos', icon: Heart }, { label: 'Histórico', icon: Clock3 }, { label: 'Álbuns', icon: Disc3 },
 ];
 const readSaved = () => { try { return { ...blankState, ...JSON.parse(localStorage.getItem(STORE) || '{}') }; } catch { return blankState; } };
+function syncSafeSize(bytes, offset) { return (bytes[offset] & 0x7f) << 21 | (bytes[offset + 1] & 0x7f) << 14 | (bytes[offset + 2] & 0x7f) << 7 | bytes[offset + 3] & 0x7f; }
+function decodeId3Text(bytes) {
+  if (!bytes.length) return '';
+  const encoding = bytes[0], content = bytes.subarray(1);
+  try {
+    const decoder = encoding === 1 ? new TextDecoder('utf-16') : encoding === 2 ? new TextDecoder('utf-16be') : encoding === 3 ? new TextDecoder('utf-8') : new TextDecoder('windows-1252');
+    return decoder.decode(content).replace(/\0+$/g, '').trim();
+  } catch { return new TextDecoder().decode(content).replace(/\0+$/g, '').trim(); }
+}
+async function readId3Tags(file) {
+  const fields = {};
+  let picture = null;
+  const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
+  if (header.length >= 10 && String.fromCharCode(...header.subarray(0, 3)) === 'ID3') {
+    const version = header[3], tagSize = syncSafeSize(header, 6);
+    const body = new Uint8Array(await file.slice(10, 10 + Math.min(tagSize, 8 * 1024 * 1024)).arrayBuffer());
+    const names = version === 2 ? { TT2: 'title', TP1: 'artist', TP2: 'albumartist', TAL: 'album', TRK: 'track', TPA: 'disc', TYE: 'year', TCO: 'genre', PIC: 'picture' } : { TIT2: 'title', TPE1: 'artist', TPE2: 'albumartist', TALB: 'album', TRCK: 'track', TPOS: 'disc', TDRC: 'year', TYER: 'year', TCON: 'genre', APIC: 'picture' };
+    let offset = version === 2 ? 6 : 10;
+    while (offset + (version === 2 ? 6 : 10) <= body.length) {
+      const idLength = version === 2 ? 3 : 4, frameId = String.fromCharCode(...body.subarray(offset, offset + idLength));
+      if (!frameId.trim() || !/^[A-Z0-9]+$/.test(frameId)) break;
+      const size = version === 2 ? body[offset + 3] << 16 | body[offset + 4] << 8 | body[offset + 5] : version === 4 ? syncSafeSize(body, offset + 4) : new DataView(body.buffer, body.byteOffset + offset + 4, 4).getUint32(0);
+      const start = offset + (version === 2 ? 6 : 10), end = Math.min(start + size, body.length), data = body.subarray(start, end), name = names[frameId];
+      if (end <= start || !name) { offset = start + size; continue; }
+      if (name === 'picture' && !picture) {
+        if (frameId === 'PIC' && data.length > 5) { const format = String.fromCharCode(...data.subarray(1, 4)).toLowerCase(); let desc = 5; while (desc < data.length && data[desc] !== 0) desc++; picture = { data: data.slice(Math.min(desc + 1, data.length)), type: `image/${format === 'jpg' ? 'jpeg' : format}` }; }
+        else if (data.length > 4) { let cursor = 1; while (cursor < data.length && data[cursor] !== 0) cursor++; const mime = new TextDecoder().decode(data.subarray(1, cursor)) || 'image/jpeg'; cursor += 2; const encoding = data[0]; if (encoding === 1 || encoding === 2) { while (cursor + 1 < data.length && (data[cursor] !== 0 || data[cursor + 1] !== 0)) cursor += 2; cursor += 2; } else { while (cursor < data.length && data[cursor] !== 0) cursor++; cursor++; } picture = { data: data.slice(Math.min(cursor, data.length)), type: mime }; }
+      } else if (frameId[0] === 'T' && data.length) {
+        const value = decodeId3Text(data);
+        if (name === 'track' || name === 'disc') fields[name] = value;
+        else if (name === 'genre') fields[name] = value.split(/\0|;|\//).map(item => item.trim()).filter(Boolean);
+        else if (!fields[name]) fields[name] = value;
+      }
+      offset = start + size;
+    }
+  }
+  if (!fields.title || !fields.artist || !fields.album) {
+    const tail = new Uint8Array(await file.slice(Math.max(0, file.size - 128)).arrayBuffer());
+    if (tail.length === 128 && String.fromCharCode(...tail.subarray(0, 3)) === 'TAG') {
+      const read = (start, length) => new TextDecoder('windows-1252').decode(tail.subarray(start, start + length)).replace(/\0+$/g, '').trim();
+      fields.title ||= read(3, 30); fields.artist ||= read(33, 30); fields.album ||= read(63, 30); fields.year ||= read(93, 4);
+      if (!fields.track && tail[125] === 0 && tail[126]) fields.track = String(tail[126]);
+    }
+  }
+  const trackNo = Number(String(fields.track || '').split('/')[0]) || 0;
+  return { title: fields.title || '', artist: fields.artist || fields.albumartist || '', album: fields.album || '', trackNo, year: fields.year || '', disc: fields.disc || '', genre: fields.genre || [], picture };
+}
+function readAudioDuration(file) { return new Promise(resolve => { const audio = new Audio(), url = URL.createObjectURL(file); const finish = value => { URL.revokeObjectURL(url); resolve(Number.isFinite(value) ? Math.floor(value) : 0); }; audio.onloadedmetadata = () => finish(audio.duration); audio.onerror = () => finish(0); audio.src = url; }); }
 const database = () => new Promise((resolve, reject) => { const request = indexedDB.open('playmusic-files', 1); request.onupgradeneeded = () => request.result.createObjectStore('files'); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
 const saveFile = async (key, file) => { const db = await database(); return new Promise((resolve, reject) => { const request = db.transaction('files', 'readwrite').objectStore('files').put(file, key); request.onsuccess = () => resolve(); request.onerror = () => reject(request.error); }); };
 const getFile = async key => { const db = await database(); return new Promise((resolve, reject) => { const request = db.transaction('files').objectStore('files').get(key); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }); };
@@ -218,7 +265,12 @@ function App() {
   }
   async function saveAlbumOrder(albumId, trackIds) { try { await apiRequest(`/api/albums/${albumId}/tracks`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trackIds})}); const library=await apiRequest('/api/library');setData(library); } catch(error){setNotice(`Não foi possível salvar a ordem do álbum: ${error.message}`);} }
   async function deleteAlbum(id) { try { await apiRequest(`/api/albums/${id}`,{method:'DELETE'});setData(await apiRequest('/api/library'));setSelectedAlbum('');setNotice('Álbum removido. As músicas continuam na biblioteca.'); }catch(error){setNotice(`Não foi possível remover o álbum: ${error.message}`);} }
-  async function stageBulkFiles(files) { const rows=Array.from(files||[]).filter(file=>/\.(mp3|m4a|aac|wav|ogg|flac|opus)$/i.test(file.name)).map((file,index)=>{const parts=(file.webkitRelativePath||'').split('/').filter(Boolean);const stem=file.name.replace(/\.[^.]+$/,'').replace(/[_]+/g,' ');const parsed=stem.replace(/^\d+[\s._-]*/, '');const artistTitle=parsed.split(/\s+-\s+/);return {key:`${Date.now()}-${index}-${file.name}`,file,title:artistTitle.length>1?artistTitle.slice(1).join(' - '):parsed,artist:artistTitle.length>1?artistTitle[0]:(parts.length>2?parts.at(-3):''),album:parts.length>1?parts.at(-2):'',duration:0,metadata:null}}); setBulkRows(rows); for (const row of rows) { try { const tags=await parseBlob(row.file); const c=tags.common||{}; const numbering=c.track||{}; const picture=c.picture?.[0]; setBulkRows(current=>current.map(item=>item.key===row.key?{...item,title:c.title||item.title,artist:c.artist||c.albumartist||item.artist,album:c.album||item.album,trackNo:numbering.no||0,duration:Math.floor(tags.format?.duration||0),cover:picture?new Blob([picture.data],{type:picture.format||'image/jpeg'}):null,metadata:{id3:{genre:c.genre||[],year:c.year||null,track:numbering,disc:c.disk||null}}}:item)); } catch { const probe=new Audio(),url=URL.createObjectURL(row.file);probe.onloadedmetadata=()=>{setBulkRows(current=>current.map(item=>item.key===row.key?{...item,duration:Math.floor(probe.duration||0)}:item));URL.revokeObjectURL(url);};probe.onerror=()=>URL.revokeObjectURL(url);probe.src=url; } } setNotice(`${rows.length} arquivos carregados. Tags ID3, nomes de arquivos e pastas usados para sugerir metadados.`); }
+  async function stageBulkFiles(files) {
+    const rows=Array.from(files||[]).filter(file=>/\.(mp3|m4a|aac|wav|ogg|flac|opus)$/i.test(file.name)).map((file,index)=>{const parts=(file.webkitRelativePath||'').split('/').filter(Boolean);const parsed=file.name.replace(/\.[^.]+$/,'').replace(/[_]+/g,' ').replace(/^\d+[\s._-]*/, '');const artistTitle=parsed.split(/\s+-\s+/);return {key:`${Date.now()}-${index}-${file.name}`,file,title:artistTitle.length>1?artistTitle.slice(1).join(' - '):parsed,artist:artistTitle.length>1?artistTitle[0]:(parts.length>2?parts.at(-3):''),album:parts.length>1?parts.at(-2):'',duration:0,metadata:null}});
+    setBulkRows(rows);
+    await Promise.all(rows.map(async row=>{const tags=await readId3Tags(row.file).catch(()=>null);const duration=await readAudioDuration(row.file);setBulkRows(current=>current.map(item=>item.key===row.key?{...item,title:tags?.title||item.title,artist:tags?.artist||item.artist,album:tags?.album||item.album,trackNo:tags?.trackNo||0,duration,cover:tags?.picture?new Blob([tags.picture.data],{type:tags.picture.type}):null,metadata:{id3:{genre:tags?.genre||[],year:tags?.year||null,track:tags?.trackNo||0,disc:tags?.disc||''}}}:item));}));
+    setNotice(`${rows.length} arquivos carregados. Tags ID3, nomes de arquivos e pastas usados para sugerir metadados.`);
+  }
   function reorderBulk(from,to) { setBulkRows(rows=>{const next=[...rows],item=next.splice(from,1)[0];next.splice(to,0,item);return next;}); }
   async function suggestBulkRow(key) {
     if(!lastfmKey){setNotice('Configure sua chave Last.fm para buscar sugestões.');return;}

@@ -1,0 +1,58 @@
+- generic [ref=f12e3]:
+  - banner [ref=f12e4]:
+    - button "Consona" [ref=f12e5] [cursor=pointer]
+    - navigation [ref=f12e8]:
+      - button "Início" [ref=f12e9] [cursor=pointer]
+      - button "Explorar" [ref=f12e13] [cursor=pointer]
+      - button "Biblioteca" [ref=f12e17] [cursor=pointer]
+      - button "Playlists" [ref=f12e20] [cursor=pointer]
+      - button "Favoritos" [ref=f12e23] [cursor=pointer]
+      - button "Histórico" [ref=f12e26] [cursor=pointer]
+      - button "Álbuns" [active] [ref=f12e30] [cursor=pointer]
+      - button "Configurações" [ref=f12e36] [cursor=pointer]
+    - generic [ref=f12e40]:
+      - button "Minimizar" [ref=f12e41]: −
+      - button "Maximizar" [ref=f12e42]: □
+      - button "Fechar" [ref=f12e43]: ×
+  - main [ref=f12e268]:
+    - generic [ref=f12e277]:
+      - heading "Álbuns" [level=1] [ref=f12e278]
+      - paragraph [ref=f12e279]: 0 ?lbuns compartilhados
+    - generic [ref=f12e280]:
+      - generic [ref=f12e281]:
+        - heading "Criar álbum" [level=2] [ref=f12e282]
+        - generic [ref=f12e283]:
+          - text: Nome do álbum
+          - textbox "Nome do álbum" [ref=f12e284]
+        - generic [ref=f12e285]:
+          - text: Artista
+          - textbox "Artista" [ref=f12e286]:
+            - /placeholder: Artista (opcional)
+        - button "Pesquisar MusicBrainz + capa" [ref=f12e287] [cursor=pointer]
+        - generic [ref=f12e291]:
+          - text: Capa do álbum (URL)
+          - textbox "Capa do álbum (URL)" [ref=f12e292]:
+            - /placeholder: URL da capa ou use a busca acima
+        - strong [ref=f12e293]: Selecionar músicas existentes
+        - generic [ref=f12e295]:
+          - checkbox "No More What Ifs Lyn ? 『ペルソナ5 ザ・ロイヤル』 オリジナル・サウンドトラック" [ref=f12e296]
+          - generic [ref=f12e297]:
+            - text: No More What Ifs
+            - generic [ref=f12e298]: Lyn ? 『ペルソナ5 ザ・ロイヤル』 オリジナル・サウンドトラック
+        - button "Criar álbum" [ref=f12e299] [cursor=pointer]
+      - generic [ref=f12e301]:
+        - heading "Adicionar MP3s e agrupar em álbuns" [level=2] [ref=f12e302]
+        - paragraph [ref=f12e303]: Selecione uma pasta inteira ou vários arquivos. Tags ID3, nomes e pastas sugerem os dados; confira, pesquise e ordene antes do envio.
+        - button "Selecionar arquivos" [ref=f12e304] [cursor=pointer]
+        - button "Selecionar pasta" [ref=f12e306] [cursor=pointer]
+    - generic [ref=f12e307]: Seus álbuns aparecerão aqui.
+  - contentinfo [ref=f12e213]:
+    - generic [ref=f12e214]: Consona
+    - generic [ref=f12e216]:
+      - button "Faixa anterior" [ref=f12e217] [cursor=pointer]
+      - button "Reproduzir" [ref=f12e220] [cursor=pointer]
+      - button "Pr?xima faixa" [ref=f12e223] [cursor=pointer]
+    - generic [ref=f12e226]: No More What Ifs — Lyn
+    - slider "Posi??o da m?sica" [ref=f12e228]: "0"
+    - generic [ref=f12e229]: 0:00 / 4:00
+    - generic [ref=f12e230]: 21:58
