@@ -10,7 +10,7 @@ const allowedOrigins = new Set([
 function responseHeaders(request, extra = {}) {
   const origin = request.headers.get('Origin');
   const headers = new Headers({
-    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Range, If-Range',
     'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Range, Content-Length, ETag',
     'Vary': 'Origin',
@@ -124,7 +124,8 @@ async function uploadTrack(request, env) {
 function safeRemoteImage(value) {
   try {
     const url = new URL(String(value || ''));
-    return url.protocol === 'https:' && ['upload.wikimedia.org', 'coverartarchive.org'].includes(url.hostname) ? url.href.slice(0, 2000) : '';
+    const allowedHost = ['upload.wikimedia.org', 'coverartarchive.org'].includes(url.hostname) || /^encrypted-tbn\d+\.gstatic\.com$/.test(url.hostname);
+    return url.protocol === 'https:' && allowedHost ? url.href.slice(0, 2000) : '';
   } catch { return ''; }
 }
 
