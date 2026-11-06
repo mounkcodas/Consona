@@ -56,14 +56,21 @@ async function getLibrary(request, env) {
       duration: formatTime(track.duration_seconds), seconds: track.duration_seconds,
       src: mediaUrl(request, track.audio_key),
       mainArt: mediaUrl(request, track.main_key) || parseMetadata(track.metadata_json).mainImageUrl || '',
-      cover: mediaUrl(request, track.cover_key) || parseMetadata(track.metadata_json).coverUrl || '',
+      cover: parseMetadata(track.metadata_json).coverUrl || mediaUrl(request, track.cover_key) || '',
       metadata: parseMetadata(track.metadata_json),
     })),
     playlists: playlistRows.results.map(list => ({
       id: list.id, name: list.name, trackIds: itemsByPlaylist.get(list.id) || [],
       cover: mediaUrl(request, trackRows.results.find(track => track.id === (itemsByPlaylist.get(list.id) || [])[0])?.cover_key),
     })),
-    albums: albumRows.results.map(album => ({ id:album.id, title:album.title, artist:album.artist, trackIds:itemsByAlbum.get(album.id)||[], cover:mediaUrl(request,album.cover_key)||album.cover_url||'', metadata:parseMetadata(album.metadata_json) })),
+    albums: albumRows.results.map(album => {
+      const trackIds=itemsByAlbum.get(album.id)||[];
+      const firstTrack=trackRows.results.find(track=>track.id===trackIds[0]);
+      const firstTrackMetadata=parseMetadata(firstTrack?.metadata_json);
+      return { id:album.id, title:album.title, artist:album.artist, trackIds,
+        cover:mediaUrl(request,album.cover_key)||album.cover_url||firstTrackMetadata.coverUrl||mediaUrl(request,firstTrack?.cover_key)||'',
+        metadata:parseMetadata(album.metadata_json) };
+    }),
     favorites: favoriteRows.results.map(row => row.track_id),
     history: historyRows.results.map(row => row.track_id),
   });
@@ -89,12 +96,12 @@ async function uploadTrack(request, env) {
   const audio = form.get('audio');
   const cover = form.get('cover');
   const mainImage = form.get('mainImage');
-  const coverUrl = safeRemoteImage(form.get('coverUrl'));
+  const coverUrl = String(form.get('coverUrl')||'');
   const mainImageUrl = safeRemoteImage(form.get('mainImageUrl'));
   let metadata = {};
   try { metadata = JSON.parse(String(form.get('metadata') || '{}')); } catch { return fail(request, 'Metadados inválidos.'); }
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || JSON.stringify(metadata).length > 24000) return fail(request, 'Metadados inválidos ou muito extensos.');
-  metadata.coverUrl = coverUrl;
+  metadata.coverUrl = await approvedImageUrl(env,coverUrl||metadata.coverUrl,metadata.googleCoverProof);
   metadata.mainImageUrl = mainImageUrl;
   if (!title || !artist || !album || !(audio instanceof File)) return fail(request, 'Informe música, artista, álbum e arquivo de áudio.');
   if (audio.size < 1 || audio.size > 32 * 1024 * 1024) return fail(request, 'O áudio deve ter até 32 MB.', 413);
@@ -124,9 +131,42 @@ async function uploadTrack(request, env) {
 function safeRemoteImage(value) {
   try {
     const url = new URL(String(value || ''));
-    const allowedHost = ['upload.wikimedia.org', 'coverartarchive.org'].includes(url.hostname) || /^encrypted-tbn\d+\.gstatic\.com$/.test(url.hostname);
+    const allowedHost = ['upload.wikimedia.org', 'coverartarchive.org', 'lastfm.freetls.fastly.net', 'lastfm-img2.akamaized.net'].includes(url.hostname) || /^encrypted-tbn\d+\.gstatic\.com$/.test(url.hostname);
     return url.protocol === 'https:' && allowedHost ? url.href.slice(0, 2000) : '';
   } catch { return ''; }
+}
+
+async function googleImageProof(env, url) {
+  const secret=env.GOOGLE_CSE_API_KEY;
+  if(!secret)return '';
+  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  const signature=new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(url)));
+  return btoa(String.fromCharCode(...signature)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+
+async function approvedImageUrl(env, value, proof) {
+  const url=safeRemoteImage(value);
+  if(url)return url;
+  const candidate=String(value||'').slice(0,2000);
+  if(!/^https:\/\//i.test(candidate)||!proof||!env.GOOGLE_CSE_API_KEY)return '';
+  const expected=await googleImageProof(env,candidate);
+  return expected===proof?candidate:'';
+}
+
+async function googleImageSearch(request, env) {
+  if(!env.GOOGLE_CSE_API_KEY||!env.GOOGLE_CSE_CX)return fail(request,'A busca Google ainda não está configurada no backend.',503);
+  const query=(new URL(request.url).searchParams.get('q')||'').trim().slice(0,180);
+  if(!query)return fail(request,'Informe o que deseja pesquisar.');
+  const params=new URLSearchParams({key:env.GOOGLE_CSE_API_KEY,cx:env.GOOGLE_CSE_CX,q:query,searchType:'image',num:'8',safe:'active'});
+  const response=await fetch(`https://www.googleapis.com/customsearch/v1?${params}`);
+  const payload=await response.json().catch(()=>({}));
+  if(!response.ok)return fail(request,payload.error?.message||'A pesquisa Google falhou.',response.status);
+  const items=(await Promise.all((payload.items||[]).map(async item=>({
+    title:item.title||'Imagem',url:/^https:\/\//i.test(item.link||'')?item.link:'',thumbnail:item.image?.thumbnailLink||item.link||'',
+    source:item.image?.contextLink||item.displayLink||'',width:item.image?.width||0,height:item.image?.height||0,
+    proof:await googleImageProof(env,item.link||''),
+  })))).filter(item=>item.url);
+  return json(request,{items});
 }
 
 function safeName(name) {
@@ -171,7 +211,7 @@ async function createAlbum(request, env) {
   const artist = String(payload.artist || '').trim().slice(0,180);
   const trackIds = Array.isArray(payload.trackIds) ? [...new Set(payload.trackIds.map(String))].slice(0,500) : [];
   if (!title) return fail(request,'Informe o nome do álbum.');
-  const id=crypto.randomUUID(), coverUrl=safeRemoteImage(payload.coverUrl);
+  const id=crypto.randomUUID(), coverUrl=await approvedImageUrl(env,payload.coverUrl,payload.coverProof);
   const metadata=payload.metadata&&typeof payload.metadata==='object'&&!Array.isArray(payload.metadata)?JSON.stringify(payload.metadata).slice(0,12000):'{}';
   const statements=[env.DB.prepare('INSERT INTO albums (id,title,artist,cover_url,metadata_json) VALUES (?,?,?,?,?)').bind(id,title,artist,coverUrl,metadata)];
   for (const [position,trackId] of trackIds.entries()) statements.push(env.DB.prepare('INSERT OR IGNORE INTO album_tracks (album_id,track_id,position) SELECT ?,id,? FROM tracks WHERE id=?').bind(id,position,trackId));
@@ -185,7 +225,7 @@ async function updateAlbum(request, env, id) {
   if (!current) return fail(request, 'Álbum não encontrado.', 404);
   const title = String(payload.title ?? current.title).trim().slice(0,180);
   const artist = String(payload.artist ?? current.artist).trim().slice(0,180);
-  const coverUrl = payload.coverUrl === undefined ? current.cover_url : safeRemoteImage(payload.coverUrl);
+  const coverUrl = payload.coverUrl === undefined ? current.cover_url : await approvedImageUrl(env,payload.coverUrl,payload.coverProof);
   const metadata = payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? JSON.stringify(payload.metadata).slice(0,12000) : current.metadata_json;
   if (!title) return fail(request, 'Informe o nome do álbum.');
   await env.DB.prepare('UPDATE albums SET title=?,artist=?,cover_url=?,metadata_json=? WHERE id=?').bind(title,artist,coverUrl,metadata,id).run();
@@ -198,7 +238,20 @@ async function route(request, env) {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: responseHeaders(request, { 'Access-Control-Max-Age': '86400' }) });
   if (path === '/api/health' && request.method === 'GET') return json(request, { ok: true });
   if (path === '/api/library' && request.method === 'GET') return getLibrary(request, env);
+  if (path === '/api/covers/google' && request.method === 'GET') return googleImageSearch(request, env);
   if (path === '/api/tracks' && request.method === 'POST') return uploadTrack(request, env);
+  const trackCoverMatch = path.match(/^\/api\/tracks\/([^/]+)\/cover$/);
+  if (trackCoverMatch && request.method === 'PUT') {
+    const payload = await request.json();
+    const coverUrl = await approvedImageUrl(env,payload.coverUrl,payload.coverProof);
+    if (!coverUrl) return fail(request, 'URL de capa inválida.');
+    const current = await env.DB.prepare('SELECT metadata_json FROM tracks WHERE id = ?').bind(trackCoverMatch[1]).first();
+    if (!current) return fail(request, 'Música não encontrada.', 404);
+    const metadata = parseMetadata(current.metadata_json);
+    metadata.coverUrl = coverUrl;
+    await env.DB.prepare('UPDATE tracks SET metadata_json = ? WHERE id = ?').bind(JSON.stringify(metadata), trackCoverMatch[1]).run();
+    return json(request, { ok: true, coverUrl });
+  }
   const mediaMatch = path.match(/^\/api\/media\/(.+)$/);
   if (mediaMatch && request.method === 'GET') return mediaResponse(request, env, decodeURIComponent(mediaMatch[1]));
   if (path === '/api/playlists' && request.method === 'POST') return createPlaylist(request, env);
