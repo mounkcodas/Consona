@@ -92,10 +92,16 @@ function formatTime(seconds) {
 const bytesToHex = bytes => [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('');
 function randomHex(size) { const bytes = crypto.getRandomValues(new Uint8Array(size)); return [...bytes].map(value => value.toString(16).padStart(2, '0')).join(''); }
 async function digestHex(value) { return bytesToHex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))); }
+function constantTimeEqual(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index++) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
 async function passwordDigest(password, saltHex) {
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
   const salt = Uint8Array.from(saltHex.match(/.{2}/g) || [], part => parseInt(part, 16));
-  return bytesToHex(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 150000 }, key, 256));
+  return bytesToHex(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 }, key, 256));
 }
 function publicUser(user, request) {
   return { id: user.id, username: user.username, displayName: user.display_name, avatar: mediaUrl(request, user.avatar_key) };
@@ -137,7 +143,7 @@ async function authRoutes(request, env, path) {
     const record = await env.DB.prepare('SELECT * FROM users WHERE username=? COLLATE NOCASE').bind(username).first();
     const expected = record?.password_hash || '00'.repeat(32);
     const actual = await passwordDigest(password.slice(0, 128), record?.password_salt || '00'.repeat(16));
-    const valid = crypto.subtle.timingSafeEqual(Uint8Array.from(expected.match(/.{2}/g), part => parseInt(part, 16)), Uint8Array.from(actual.match(/.{2}/g), part => parseInt(part, 16)));
+    const valid = constantTimeEqual(Uint8Array.from(expected.match(/.{2}/g), part => parseInt(part, 16)), Uint8Array.from(actual.match(/.{2}/g), part => parseInt(part, 16)));
     if (!record || !valid) {
       await env.DB.prepare(`INSERT INTO auth_attempts (attempt_key,failures,window_start) VALUES (?,1,datetime('now'))
         ON CONFLICT(attempt_key) DO UPDATE SET failures=CASE WHEN window_start <= datetime('now','-15 minutes') THEN 1 ELSE failures+1 END, window_start=CASE WHEN window_start <= datetime('now','-15 minutes') THEN datetime('now') ELSE window_start END`).bind(attemptKey).run();
@@ -244,7 +250,7 @@ async function approvedImageUrl(env, value, proof) {
     crypto.subtle.digest('SHA-256',encoder.encode(expected)),
     crypto.subtle.digest('SHA-256',encoder.encode(String(proof))),
   ]);
-  return crypto.subtle.timingSafeEqual(expectedHash,providedHash)?candidate:'';
+  return constantTimeEqual(expectedHash,providedHash)?candidate:'';
 }
 
 async function googleImageSearch(request, env) {
@@ -349,7 +355,7 @@ async function route(request, env) {
     return json(request, payload);
   }
   if (path === '/api/health' && request.method === 'GET') return json(request, { ok: true });
-  if (path === '/api/library' && request.method === 'GET') return getLibrary(request, env, user);
+  if (path === '/api/library' && request.method === 'GET') return user ? getLibrary(request, env, user) : fail(request, 'Entre na sua conta para acessar a biblioteca.', 401);
   if (path === '/api/covers/google' && request.method === 'GET') return googleImageSearch(request, env);
   if (path === '/api/tracks' && request.method === 'POST') return user ? uploadTrack(request, env, user) : fail(request, 'Entre na sua conta para adicionar músicas.', 401);
   const trackLyricsMatch = path.match(/^\/api\/tracks\/([^/]+)\/lyrics$/);

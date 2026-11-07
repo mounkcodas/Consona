@@ -86,6 +86,7 @@ async function lastfmRequest(method, values = {}, options = {}) {
 function App() {
   const [data, setData] = useState(readSaved);
   const [currentUser, setCurrentUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
   const { tracks, playlists, albums = [], history, favorites } = data;
   const [currentId, setCurrentId] = useState(() => readSaved().tracks[0]?.id ?? null);
   const [playing, setPlaying] = useState(false);
@@ -181,16 +182,24 @@ function App() {
 
   useEffect(() => { try { localStorage.removeItem('playmusic-tracks'); localStorage.removeItem('playmusic-library-v2'); localStorage.removeItem('playmusic-lastfm-key'); } catch {} }, []);
   useEffect(() => {
-    if (!sessionStorage.getItem('consona-session')) return;
-    apiRequest('/api/auth/me').then(result => setCurrentUser(result.user)).catch(() => sessionStorage.removeItem('consona-session'));
+    if (!sessionStorage.getItem('consona-session')) { setData(blankState); setCurrentId(null); setReady(true); setAuthReady(true); return; }
+    apiRequest('/api/auth/me').then(result => setCurrentUser(result.user)).catch(() => { sessionStorage.removeItem('consona-session'); setData(blankState); setCurrentId(null); }).finally(() => setAuthReady(true));
   }, []);
+  useEffect(() => {
+    if (!authReady) return;
+    const route = currentUser ? '/app' : '/login';
+    if (window.location.pathname !== route) window.history.replaceState({}, '', route);
+  }, [authReady, currentUser]);
   async function handleUserChange(user) {
     setCurrentUser(user);
     setData(value => ({ ...value, favorites: [], history: [] }));
+    window.history.replaceState({}, '', user ? '/app' : '/login');
+    if (!user) { setData(blankState); setCurrentId(null); setPlaying(false); return; }
     try { setData(await apiRequest('/api/library')); }
     catch (error) { setNotice(error.message); }
   }
   useEffect(() => {
+    if (!currentUser) { setReady(true); return; }
     let cancelled = false;
     const refreshLibrary = async (initial = false) => {
       try {
@@ -207,7 +216,7 @@ function App() {
     refreshLibrary(true);
     const timer = window.setInterval(() => refreshLibrary(), 15000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, []);
+  }, [currentUser]);
   useEffect(() => { if (!ready) return; try { localStorage.setItem(STORE, JSON.stringify({ ...data, favorites: [], history: [], tracks: tracks.map(({src, ...track}) => ({...track, src})) })); } catch { setNotice('Não foi possível salvar o cache da biblioteca.'); } }, [data, ready]);
   useEffect(() => { const audio = audioRef.current; if (!ready || !audio || !current) return; audio.volume = volume / 100; if (!current.src) { setPlaying(false); return; } if (audio.src !== current.src) { audio.src = current.src; audio.load(); } if (playing) audio.play().catch(() => setPlaying(false)); else audio.pause(); }, [ready, currentId, playing, volume, current?.src]);
   useEffect(() => { if (!playing || current?.src) return; const timer = setInterval(() => setElapsed(value => Math.min(value + 1, seconds)), 1000); return () => clearInterval(timer); }, [playing, current?.src, seconds]);
@@ -422,6 +431,9 @@ function App() {
   function goSection(label) { setSection(label); if (label !== 'Playlists') setSelectedPlaylist(''); if (label === 'Explorar') setQuery(''); if (label === 'Favoritos') setQuery(''); if (label === 'Histórico') setQuery(''); }
   function statusTitle() { if (section === 'Histórico') return 'Histórico de reprodução'; if (section === 'Favoritos') return 'Suas músicas favoritas'; if (section === 'Explorar') return 'Explore sua biblioteca'; if (section === 'Biblioteca') return 'Sua biblioteca de playlists'; if (section === 'Playlists') return selected?.name || 'Suas playlists'; return current ? 'Reproduzindo agora' : 'Sua música começa aqui'; }
   function playButtonAction() { if (!current) { setSection('Configurações'); return; } setPlaying(value => !value); }
+
+  if (!authReady || !ready) return <main className="auth-gate loading-gate"><span className="brand-mark"><img src={brandIcon} alt=""/></span><strong>Consona</strong><p>Preparando sua biblioteca…</p></main>;
+  if (!currentUser) return <main className="auth-gate"><div className="auth-page-brand"><span className="brand-mark"><img src={brandIcon} alt=""/></span><strong>Consona</strong><small>Sua música, do seu jeito</small></div><AccountControl user={null} onUserChange={handleUserChange} page/></main>;
 
   return <div className="desktop">
     <header className="topbar"><button className="brand" onClick={() => { setSection('Reproduzindo'); setSelectedPlaylist(''); }}><span className="brand-mark"><img src={brandIcon} alt=""/></span><span>Consona</span></button><nav className={`top-nav ${mobileMore ? "expanded" : ""}`}><button className={`top-link ${section === 'Reproduzindo' ? 'selected' : ''}`} onClick={() => goSection('Reproduzindo')}><Home/>Início</button><button className={`top-link ${section === 'Explorar' ? 'selected' : ''}`} onClick={() => goSection('Explorar')}><Search/>Explorar</button><button className={`top-link ${section === 'Biblioteca' ? 'selected' : ''}`} onClick={() => goSection('Biblioteca')}><Library/>Biblioteca</button><button className={`top-link ${section === 'Playlists' ? 'selected' : ''}`} onClick={() => goSection('Playlists')}><ListMusic/>Playlists</button><button className={`top-link ${section === 'Favoritos' ? 'selected' : ''}`} onClick={() => goSection('Favoritos')}><Heart/>Favoritos</button><button className={`top-link ${section === 'Histórico' ? 'selected' : ''}`} onClick={() => goSection('Histórico')}><Clock3/>Histórico</button><button className={`top-link ${section === 'Álbuns' ? 'selected' : ''}`} onClick={() => {goSection('Álbuns');setSelectedAlbum('');}}><Disc3/>Álbuns</button><button className={`top-link ${section === 'Configurações' ? 'selected' : ''}`} onClick={() => goSection('Configurações')}><Settings/>Configurações</button><button className="top-link mobile-more" aria-expanded={mobileMore} onClick={() => setMobileMore(value => !value)}><Settings/>Mais</button></nav><AccountControl user={currentUser} onUserChange={handleUserChange}/><div className="window-controls"><button aria-label="Minimizar">−</button><button aria-label="Maximizar">□</button><button className="close" aria-label="Fechar">×</button></div></header>

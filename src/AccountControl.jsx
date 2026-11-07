@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { LogIn, LogOut, UserRound, X } from 'lucide-react';
 
-export default function AccountControl({ user, onUserChange }) {
+export default function AccountControl({ user, onUserChange, page = false }) {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState('login');
   const [username, setUsername] = useState('');
@@ -32,6 +32,11 @@ export default function AccountControl({ user, onUserChange }) {
     try { await fetch(`${import.meta.env.VITE_API_BASE || 'https://playmusic-library-api.aleixomaycon.workers.dev'}/api/auth/logout`, { method: 'POST', headers: authHeaders() }); } catch {}
     sessionStorage.removeItem('consona-session'); setOpen(false); onUserChange(null);
   }
+
+  if (page && !user) return <section className="settings-modal account-modal account-page-card" role="region" aria-labelledby="account-title">
+    <header><span id="account-title"><UserRound size={18}/>{mode === 'register' ? 'Criar conta' : 'Entrar'}</span></header>
+    <form className="modal-body account-form" onSubmit={submit}><label>Nome de usuário<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} minLength={3} maxLength={24} required/></label><label>Senha<input autoComplete={mode === 'register' ? 'new-password' : 'current-password'} type="password" value={password} onChange={event => setPassword(event.target.value)} minLength={10} maxLength={128} required/></label>{mode === 'register' && <small>A senha deve ter pelo menos 10 caracteres.</small>}{error && <p className="lookup-error" role="alert">{error}</p>}<button className="save-track" disabled={busy}><LogIn size={16}/>{busy ? 'Aguarde...' : mode === 'register' ? 'Criar conta' : 'Entrar'}</button><button type="button" className="account-switch" onClick={() => { setMode(value => value === 'login' ? 'register' : 'login'); setError(''); }}>{mode === 'register' ? 'Já tem uma conta? Entrar' : 'Criar uma conta'}</button></form>
+  </section>;
 
   return <>
     <button className={`account-button ${user ? 'signed-in' : ''}`} onClick={() => { setDisplayName(user?.displayName || ''); setOpen(true); setError(''); }} aria-label={user ? `Conta de ${user.displayName}` : 'Entrar ou criar conta'}>
