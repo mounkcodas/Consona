@@ -13,7 +13,7 @@ export function parseLyrics(text) {
   return lines.sort((a, b) => a.time - b.time);
 }
 
-export default function LyricsStage({ track, elapsed, playing, onSave }) {
+export default function LyricsStage({ track, elapsed, playing, onSave, audioRef }) {
   const [view, setView] = useState('lyrics');
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
@@ -75,10 +75,9 @@ export default function LyricsStage({ track, elapsed, playing, onSave }) {
         <div className="stage-tabs"><button className={view === 'lyrics' ? 'active' : ''} onClick={() => setView('lyrics')}><ListMusic size={15}/> Letras</button><button className={view === 'art' ? 'active' : ''} onClick={() => setView('art')}><Music2 size={15}/> Álbum</button><button onClick={() => { setDraft(lyrics); setEditing(true); }} aria-label="Editar letra"><Pencil size={15}/></button></div>
         {view === 'lyrics' ? <div className="lyrics-display" aria-live="off">
           {lines.length ? <div className="lyrics-lines">{lines.slice(Math.max(0, active - 1), Math.max(0, active - 1) + 4).map((line, index) => { const actual = Math.max(0, active - 1) + index; return <div key={`${line.time}-${actual}`} className={actual === active ? 'active' : ''}>{line.text}</div>; })}</div>
-            : plainLyrics ? <div className="lyrics-plain">{plainLyrics}</div> : <div className="lyrics-empty"><Music2 size={23}/><span>{searchState === 'loading' ? 'Buscando letra no LRCLIB...' : searchState === 'error' ? 'Não foi possível buscar a letra.' : 'Nenhuma letra encontrada para esta música.'}</span>{searchState === 'error' && <button type="button" onClick={() => setRetry(value => value + 1)}>Tentar novamente</button>}<button onClick={() => { setDraft(lyrics); setEditing(true); }}>Adicionar letra</button></div>}
+            : plainLyrics ? <div className="lyrics-plain">{plainLyrics}</div> : <div className="lyrics-empty"><Music2 size={23}/><span>{searchState === 'loading' ? 'Procurando a letra...' : searchState === 'error' ? 'Não foi possível buscar a letra.' : 'Nenhuma letra encontrada para esta música.'}</span>{searchState === 'error' && <button type="button" onClick={() => setRetry(value => value + 1)}>Tentar novamente</button>}<button onClick={() => { setDraft(lyrics); setEditing(true); }}>Adicionar letra</button></div>}
         </div> : <div className="album-display"><Disc3 size={38}/><span>{track.album || 'Sua música, do seu jeito'}</span></div>}
-        {view === 'lyrics' && foundLyrics && !savedLyrics && <a className="lyrics-source" href="https://lrclib.net/" target="_blank" rel="noreferrer">Letra encontrada no LRCLIB</a>}
-        <div className={`visualizer ${playing ? 'playing' : ''}`} aria-hidden="true">{Array.from({ length: 32 }, (_, i) => <i key={i} style={{ '--bar-height': `${18 + ((i * 37 + 23) % 70)}%`, '--bar-delay': `${(i % 7) * -0.13}s` }}/>)}</div>
+        {view === 'lyrics' && foundLyrics && !savedLyrics && <span className="lyrics-source">Letra sincronizada</span>}
       </div>
     </div>
     {editing && <div className="modal-scrim" onClick={() => !saving && setEditing(false)}><section className="settings-modal lyrics-modal" onClick={event => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="lyrics-title"><header><span id="lyrics-title"><Music2 size={19}/> Letra de {track.title}</span><button type="button" onClick={() => setEditing(false)} aria-label="Fechar"><X size={19}/></button></header><form className="modal-body" onSubmit={save}><p>Cole a letra ou use LRC para sincronizar cada linha com a música.</p><p className="lyrics-example">Exemplo: [00:12.50] Primeira linha</p><textarea value={draft} onChange={event => setDraft(event.target.value)} maxLength={20000} placeholder={'[00:12.50] Primeira linha\n[00:18.00] Próxima linha'} aria-label="Letra da música"/><label className="lyrics-file">Importar arquivo .lrc ou .txt<input type="file" accept=".lrc,.txt,text/plain" onChange={event => { const file = event.target.files?.[0]; if (file) file.text().then(setDraft).catch(() => setError('Não foi possível ler o arquivo.')); }}/></label>{error && <p className="lookup-error" role="alert">{error}</p>}<button className="save-track" disabled={saving}>{saving ? 'Salvando...' : 'Salvar letra'}</button></form></section></div>}
