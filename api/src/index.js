@@ -1,3 +1,5 @@
+import { importRoutes } from './import-workspace.js';
+
 const allowedOrigins = new Set([
   'https://mounkcodas.github.io',
   'https://obgmusicplayer.aleixomaycon.workers.dev',
@@ -34,7 +36,7 @@ function mediaUrl(request, key) {
 
 async function getLibrary(request, env, user) {
   const [trackRows, playlistRows, itemRows, favoriteRows, historyRows, albumRows, albumItemRows, userRows] = await Promise.all([
-    env.DB.prepare('SELECT * FROM tracks ORDER BY created_at DESC').all(),
+    env.DB.prepare('SELECT * FROM tracks WHERE import_batch_id IS NULL ORDER BY created_at DESC').all(),
     env.DB.prepare('SELECT * FROM playlists ORDER BY created_at DESC').all(),
     env.DB.prepare('SELECT playlist_id, track_id FROM playlist_tracks ORDER BY position, rowid').all(),
     user ? env.DB.prepare('SELECT track_id FROM user_favorites WHERE user_id=?').bind(user.id).all() : Promise.resolve({ results: [] }),
@@ -52,13 +54,21 @@ async function getLibrary(request, env, user) {
   }
   const itemsByAlbum = new Map();
   for (const item of albumItemRows.results) { const entries = itemsByAlbum.get(item.album_id) || []; entries.push(item.track_id); itemsByAlbum.set(item.album_id, entries); }
+  const albumCover = album => {
+    if (!album) return '';
+    const firstTrack = trackRows.results.find(track => track.id === (itemsByAlbum.get(album.id) || [])[0]);
+    return mediaUrl(request, album.cover_key) || album.cover_url || parseMetadata(firstTrack?.metadata_json).coverUrl || mediaUrl(request, firstTrack?.cover_key) || '';
+  };
+  const primaryAlbum = track => albumRows.results.find(album => album.id === track.primary_album_id);
+  const individualCover = track => parseMetadata(track.metadata_json).coverUrl || mediaUrl(request, track.cover_key) || '';
   return json(request, {
     tracks: trackRows.results.map(track => ({
-      id: track.id, title: track.title, artist: track.artist, album: track.album,
+      id: track.id, title: track.title, artist: track.artist, album: primaryAlbum(track)?.title || track.album,
+      primaryAlbumId: track.primary_album_id, fileHash: track.content_hash || '', coverMode: parseMetadata(track.metadata_json).coverMode || 'individual', individualCover: individualCover(track),
       duration: formatTime(track.duration_seconds), seconds: track.duration_seconds,
       src: mediaUrl(request, track.audio_key),
       mainArt: mediaUrl(request, track.main_key) || parseMetadata(track.metadata_json).mainImageUrl || '',
-      cover: parseMetadata(track.metadata_json).coverUrl || mediaUrl(request, track.cover_key) || '',
+      cover: parseMetadata(track.metadata_json).coverMode === 'album' ? albumCover(primaryAlbum(track)) || individualCover(track) : individualCover(track) || albumCover(primaryAlbum(track)),
       metadata: parseMetadata(track.metadata_json),
       addedBy: usersById.get(track.added_by) || null,
     })),
@@ -182,10 +192,18 @@ async function updateProfile(request, env, user) {
   return json(request, { user: publicUser({ ...user, display_name: displayName }, request) });
 }
 
-async function uploadTrack(request, env, user) {
+async function uploadTrack(request, env, user, staged = false) {
   const declaredLength = Number(request.headers.get('Content-Length') || 0);
   if (declaredLength > 48 * 1024 * 1024) return fail(request, 'O envio ultrapassa o limite de 48 MB.', 413);
   const form = await request.formData();
+  const batchId = staged ? String(form.get('batchId') || '') : null, itemKey = staged ? String(form.get('itemKey') || '') : null;
+  const fileHash = /^[a-f0-9]{64}$/i.test(String(form.get('fileHash') || '')) ? String(form.get('fileHash')).toLowerCase() : null;
+  if (staged) {
+    if (!/^[a-f0-9-]{36}$/i.test(batchId) || !/^[a-f0-9-]{36}$/i.test(itemKey)) return fail(request, 'Rascunho inválido.');
+    const previous = await env.DB.prepare('SELECT id FROM tracks WHERE added_by=? AND import_batch_id=? AND import_item_key=?').bind(user.id, batchId, itemKey).first();
+    if (previous) return json(request, { id: previous.id });
+    if (fileHash && await env.DB.prepare('SELECT id FROM tracks WHERE content_hash=? AND import_batch_id IS NULL').bind(fileHash).first()) return fail(request, 'Este arquivo já está na biblioteca. Adicione a música existente ao rascunho.', 409);
+  }
   const title = String(form.get('title') || '').trim().slice(0, 180);
   const artist = String(form.get('artist') || '').trim().slice(0, 180);
   const album = String(form.get('album') || '').trim().slice(0, 180);
@@ -216,10 +234,11 @@ async function uploadTrack(request, env, user) {
     await env.MEDIA.put(audioKey, audio.stream(), { httpMetadata: { contentType: audio.type || 'application/octet-stream', cacheControl: 'public, max-age=31536000, immutable' } });
     if (coverKey && cover instanceof File) await env.MEDIA.put(coverKey, cover.stream(), { httpMetadata: { contentType: cover.type, cacheControl: 'public, max-age=31536000, immutable' } });
     if (mainKey && mainImage instanceof File) await env.MEDIA.put(mainKey, mainImage.stream(), { httpMetadata: { contentType: mainImage.type, cacheControl: 'public, max-age=31536000, immutable' } });
-    await env.DB.prepare('INSERT INTO tracks (id, title, artist, album, duration_seconds, audio_key, cover_key, main_key, metadata_json, added_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .bind(id, title, artist, album, duration, audioKey, coverKey, mainKey, JSON.stringify(metadata), user.id).run();
+    await env.DB.prepare('INSERT INTO tracks (id, title, artist, album, duration_seconds, audio_key, cover_key, main_key, metadata_json, added_by,content_hash,import_batch_id,import_item_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?)')
+      .bind(id, title, artist, album, duration, audioKey, coverKey, mainKey, JSON.stringify(metadata), user.id, fileHash, batchId, itemKey).run();
   } catch (error) {
     await Promise.all([audioKey, coverKey, mainKey].filter(Boolean).map(key => env.MEDIA.delete(key)));
+    if (staged) { const retry = await env.DB.prepare('SELECT id FROM tracks WHERE added_by=? AND import_batch_id=? AND import_item_key=?').bind(user.id, batchId, itemKey).first(); if (retry) return json(request, { id: retry.id }); }
     throw error;
   }
   return json(request, { id }, 201);
@@ -276,7 +295,7 @@ function safeName(name) {
 }
 
 async function mediaResponse(request, env, key) {
-  if (!/^(tracks|artists|users)\/[a-f0-9-]{36}\/[a-z0-9._-]+$/i.test(key)) return new Response('Not found', { status: 404 });
+  if (!/^(tracks|artists|users|albums)\/[a-f0-9-]{36}\/[a-z0-9._-]+$/i.test(key)) return new Response('Not found', { status: 404 });
   const object = await env.MEDIA.get(key, { range: request.headers });
   if (!object) return new Response('Not found', { status: 404 });
   const headers = responseHeaders(request);
@@ -328,9 +347,11 @@ async function updateAlbum(request, env, id) {
   const title = String(payload.title ?? current.title).trim().slice(0,180);
   const artist = String(payload.artist ?? current.artist).trim().slice(0,180);
   const coverUrl = payload.coverUrl === undefined ? current.cover_url : await approvedImageUrl(env,payload.coverUrl,payload.coverProof);
+  if (payload.coverUrl && !coverUrl) return fail(request, 'Escolha uma capa válida ou envie uma imagem em Configurações.');
+  const coverKey = payload.coverUrl === undefined ? current.cover_key : null;
   const metadata = payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? JSON.stringify(payload.metadata).slice(0,12000) : current.metadata_json;
   if (!title) return fail(request, 'Informe o nome do álbum.');
-  await env.DB.prepare('UPDATE albums SET title=?,artist=?,cover_url=?,metadata_json=? WHERE id=?').bind(title,artist,coverUrl,metadata,id).run();
+  await env.DB.prepare('UPDATE albums SET title=?,artist=?,cover_key=?,cover_url=?,metadata_json=? WHERE id=?').bind(title,artist,coverKey,coverUrl,metadata,id).run();
   return json(request,{ok:true});
 }
 
@@ -388,6 +409,9 @@ async function route(request, env, ctx) {
   const authResponse = await authRoutes(request, env, path);
   if (authResponse) return authResponse;
   const user = await getUser(request, env);
+  if (path === '/api/import/tracks' && request.method === 'POST') return user ? uploadTrack(request, env, user, true) : fail(request, 'Entre na sua conta para importar músicas.', 401);
+  const importResponse = await importRoutes(request, env, user, { json, fail, approvedImageUrl, mediaUrl, ctx });
+  if (importResponse) return importResponse;
   if ((path === '/api/profile' || path === '/api/auth/profile') && request.method === 'PUT') return user ? updateProfile(request, env, user) : fail(request, 'Entre na sua conta.', 401);
   if (path === '/api/lastfm' && request.method === 'GET') {
     const apiKey = env.LASTFM_API_SECRET;
@@ -429,6 +453,7 @@ async function route(request, env, ctx) {
     if (!current) return fail(request, 'Música não encontrada.', 404);
     const metadata = parseMetadata(current.metadata_json);
     metadata.coverUrl = coverUrl;
+    metadata.coverMode = 'individual';
     metadata.googleCoverProof = payload.coverProof || '';
     await env.DB.prepare('UPDATE tracks SET metadata_json = ? WHERE id = ?').bind(JSON.stringify(metadata), trackCoverMatch[1]).run();
     return json(request, { ok: true, coverUrl });
@@ -441,7 +466,21 @@ async function route(request, env, ctx) {
   if(albumMatch&&request.method==='PUT') return user ? updateAlbum(request,env,albumMatch[1]) : fail(request, 'Entre na sua conta para editar álbuns.', 401);
   if(albumMatch&&request.method==='DELETE') { if(!user)return fail(request,'Entre na sua conta para excluir álbuns.',401); await env.DB.prepare('DELETE FROM album_tracks WHERE album_id=?').bind(albumMatch[1]).run(); await env.DB.prepare('DELETE FROM albums WHERE id=?').bind(albumMatch[1]).run(); return json(request,{ok:true}); }
   const albumTracksMatch=path.match(/^\/api\/albums\/([^/]+)\/tracks$/);
-  if(albumTracksMatch&&request.method==='POST') { if(!user)return fail(request,'Entre na sua conta para alterar álbuns.',401); const payload=await request.json(); const trackIds=Array.isArray(payload.trackIds)?[...new Set(payload.trackIds.map(String))].slice(0,500):[]; await env.DB.prepare('DELETE FROM album_tracks WHERE album_id=?').bind(albumTracksMatch[1]).run(); const statements=trackIds.map((id,position)=>env.DB.prepare('INSERT OR IGNORE INTO album_tracks (album_id,track_id,position) SELECT ?,id,? FROM tracks WHERE id=?').bind(albumTracksMatch[1],position,id)); if(statements.length) await env.DB.batch(statements); return json(request,{ok:true,trackIds}); }
+  if (albumTracksMatch && request.method === 'POST') {
+    if (!user) return fail(request, 'Entre na sua conta para alterar álbuns.', 401);
+    const albumId = albumTracksMatch[1];
+    if (!await env.DB.prepare('SELECT id FROM albums WHERE id=?').bind(albumId).first()) return fail(request, 'Álbum não encontrado.', 404);
+    const payload = await request.json();
+    const trackIds = Array.isArray(payload.trackIds) ? [...new Set(payload.trackIds.map(String))].slice(0, 500) : [];
+    const found = [];
+    for (let i = 0; i < trackIds.length; i += 80) { const ids = trackIds.slice(i, i + 80); found.push(...(await env.DB.prepare(`SELECT id FROM tracks WHERE import_batch_id IS NULL AND id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results); }
+    if (found.length !== trackIds.length) return fail(request, 'Uma música não está mais na biblioteca. Atualize a página.', 409);
+    const statements = [env.DB.prepare('DELETE FROM album_tracks WHERE album_id=?').bind(albumId), env.DB.prepare('UPDATE tracks SET primary_album_id=NULL WHERE primary_album_id=?').bind(albumId)];
+    for (let i = 0; i < trackIds.length; i += 30) { const ids = trackIds.slice(i, i + 30); statements.push(env.DB.prepare(`INSERT INTO album_tracks (album_id,track_id,position) VALUES ${ids.map(() => '(?,?,?)').join(',')}`).bind(...ids.flatMap((id, index) => [albumId, id, i + index]))); }
+    for (let i = 0; i < trackIds.length; i += 80) { const ids = trackIds.slice(i, i + 80); statements.push(env.DB.prepare(`UPDATE tracks SET primary_album_id=? WHERE primary_album_id IS NULL AND id IN (${ids.map(() => '?').join(',')})`).bind(albumId, ...ids)); }
+    await env.DB.batch(statements);
+    return json(request, { ok: true, trackIds });
+  }
   const playlistMatch = path.match(/^\/api\/playlists\/([^/]+)$/);
   if (playlistMatch && request.method === 'DELETE') {
     if (!user) return fail(request, 'Entre na sua conta para excluir playlists.', 401);
@@ -474,6 +513,24 @@ async function route(request, env, ctx) {
     return json(request, { ok: true }, 201);
   }
   const trackMatch = path.match(/^\/api\/tracks\/([^/]+)$/);
+  if (trackMatch && request.method === 'PUT') {
+    if (!user) return fail(request, 'Entre na sua conta para editar músicas.', 401);
+    const current = await env.DB.prepare('SELECT * FROM tracks WHERE id=? AND import_batch_id IS NULL').bind(trackMatch[1]).first();
+    if (!current) return fail(request, 'Música não encontrada.', 404);
+    const body = await request.json(), title = String(body.title ?? current.title).trim().slice(0, 180), artist = String(body.artist ?? current.artist).trim().slice(0, 180);
+    const albumId = body.albumId === undefined ? current.primary_album_id : body.albumId || null;
+    const album = albumId ? await env.DB.prepare('SELECT id,title FROM albums WHERE id=?').bind(albumId).first() : null;
+    if (!title || !artist || (albumId && !album)) return fail(request, 'Preencha nome, artista e um álbum válido.');
+    const meta = parseMetadata(current.metadata_json);
+    if (['album', 'individual'].includes(body.coverMode)) meta.coverMode = body.coverMode;
+    const statements = [env.DB.prepare('UPDATE tracks SET title=?,artist=?,album=?,primary_album_id=?,metadata_json=? WHERE id=?').bind(title, artist, album?.title || current.album, album?.id || null, JSON.stringify(meta), current.id)];
+    if (body.albumId !== undefined && (body.albumId || null) !== current.primary_album_id) {
+      statements.push(env.DB.prepare('DELETE FROM album_tracks WHERE track_id=?').bind(current.id));
+      if (album) statements.push(env.DB.prepare('INSERT INTO album_tracks (album_id,track_id,position) VALUES (?,?,(SELECT COALESCE(MAX(position),-1)+1 FROM album_tracks WHERE album_id=?))').bind(album.id, current.id, album.id));
+    }
+    await env.DB.batch(statements);
+    return json(request, { ok: true });
+  }
   if (trackMatch && request.method === 'DELETE') {
     if (!user) return fail(request, 'Entre na sua conta para excluir músicas.', 401);
     const track = await env.DB.prepare('SELECT audio_key, cover_key, main_key FROM tracks WHERE id = ?').bind(trackMatch[1]).first();
