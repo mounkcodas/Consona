@@ -15,3 +15,9 @@ button:disabled{cursor:not-allowed!important;opacity:.48}.brand{border:0;backgro
 .album-search-results{display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid #b5cce9;border-radius:8px;background:#eef6ff}.album-search-results>strong{font-size:11px;color:#31577f}.album-search-result{display:grid;grid-template-columns:42px minmax(100px,1fr) auto;align-items:center;gap:8px;padding:6px;border-radius:6px;background:#fff}.album-search-result img,.album-search-no-cover{width:42px;height:42px;object-fit:cover;border-radius:4px}.album-search-no-cover{display:grid;place-items:center;background:#d9e6f5;color:#617c9d;font-size:8px;text-align:center}.album-search-result>span:nth-child(2){display:flex;flex-direction:column;gap:3px;min-width:0}.album-search-result b,.album-search-result small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.album-search-result small{font-size:9px;color:#7188a5}.cover-check-preview.selected{outline:2px solid #2c8b54}
 
 .album-detail-tools{flex-wrap:wrap;gap:8px}.album-detail-tools button:disabled{opacity:.55;cursor:not-allowed}
+
+/* Keep long collections cheap to paint while scrolling. */
+.collection-track,.playlist-tile,.album-track-row,.bulk-track-row{content-visibility:auto;contain-intrinsic-size:auto 64px}
+.equalizer i{animation-play-state:paused}.equalizer.playing i{animation-play-state:running}
+@media(prefers-reduced-motion:reduce){.equalizer i,.toast{animation:none!important}}
+
