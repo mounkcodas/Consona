@@ -188,12 +188,12 @@ function App() {
   useEffect(() => {
     if (!authReady) return;
     const route = currentUser ? '/app' : '/login';
-    if (window.location.pathname !== route) window.history.replaceState({}, '', route);
+    if (window.location.hash !== `#${route}`) window.history.replaceState({}, '', `/#${route}`);
   }, [authReady, currentUser]);
   async function handleUserChange(user) {
     setCurrentUser(user);
     setData(value => ({ ...value, favorites: [], history: [] }));
-    window.history.replaceState({}, '', user ? '/app' : '/login');
+    window.history.replaceState({}, '', `/#${user ? '/app' : '/login'}`);
     if (!user) { setData(blankState); setCurrentId(null); setPlaying(false); return; }
     try { setData(await apiRequest('/api/library')); }
     catch (error) { setNotice(error.message); }
