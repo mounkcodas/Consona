@@ -121,3 +121,8 @@
 [  371999ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:5173/obgmusicplayer/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:5173/obgmusicplayer/@vite/client:1034
 [  373030ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:5173/obgmusicplayer/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:5173/obgmusicplayer/@vite/client:1034
 [  374059ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:5173/obgmusicplayer/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:5173/obgmusicplayer/@vite/client:1034
+[  375078ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:5173/obgmusicplayer/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:5173/obgmusicplayer/@vite/client:1034
+[  376096ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:5173/obgmusicplayer/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:5173/obgmusicplayer/@vite/client:1034
+[  377114ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:5173/obgmusicplayer/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:5173/obgmusicplayer/@vite/client:1034
+[  378132ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:5173/obgmusicplayer/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:5173/obgmusicplayer/@vite/client:1034
+[  379162ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:5173/obgmusicplayer/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:5173/obgmusicplayer/@vite/client:1034
