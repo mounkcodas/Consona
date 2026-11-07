@@ -93,6 +93,8 @@ const bytesToHex = bytes => [...new Uint8Array(bytes)].map(value => value.toStri
 function randomHex(size) { const bytes = crypto.getRandomValues(new Uint8Array(size)); return [...bytes].map(value => value.toString(16).padStart(2, '0')).join(''); }
 async function digestHex(value) { return bytesToHex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))); }
 function constantTimeEqual(left, right) {
+  left = left instanceof Uint8Array ? left : new Uint8Array(left);
+  right = right instanceof Uint8Array ? right : new Uint8Array(right);
   if (left.length !== right.length) return false;
   let difference = 0;
   for (let index = 0; index < left.length; index++) difference |= left[index] ^ right[index];
@@ -332,14 +334,61 @@ async function updateAlbum(request, env, id) {
   return json(request,{ok:true});
 }
 
-async function route(request, env) {
+async function refreshAlbumCoverPool(env, rows) {
+  try {
+    for (let offset = 0; offset < rows.length; offset += 3) {
+      await Promise.all(rows.slice(offset, offset + 3).map(async album => {
+        const attemptedAt = Date.now();
+        try {
+          const response = await fetch(`https://coverartarchive.org/release-group/${album.id}`, {
+            headers: { Accept: 'application/json', 'User-Agent': 'Consona/1.0 (https://consona.live)' }, signal: AbortSignal.timeout(6500),
+          });
+          if (!response.ok) throw new Error(`Cover source ${response.status}`);
+          const payload = await response.json();
+          const front = payload.images?.find(image => image.front && image.approved !== false);
+          const cover = new URL(front?.thumbnails?.['250'] || front?.thumbnails?.small || '');
+          if (!['coverartarchive.org', 'archive.org'].includes(cover.hostname)) throw new Error('Invalid cover host');
+          cover.protocol = 'https:';
+          await env.DB.prepare('UPDATE discovery_album_covers SET artwork_url=?,updated_at=?,last_attempt_at=? WHERE id=?')
+            .bind(cover.href, attemptedAt, attemptedAt, album.id).run();
+        } catch {
+          await env.DB.prepare('UPDATE discovery_album_covers SET last_attempt_at=? WHERE id=?').bind(attemptedAt, album.id).run();
+        }
+      }));
+    }
+  } finally {
+    await env.DB.prepare('UPDATE discovery_cover_refresh SET lease_until=0 WHERE id=1').run();
+  }
+}
+
+async function getAlbumCoverPool(request, env, ctx) {
+  const readPool = () => env.DB.prepare("SELECT id,title,artist,artwork_url,source_url FROM discovery_album_covers WHERE artwork_url <> '' ORDER BY position,id LIMIT 24").all();
+  let pool = await readPool();
+  const now = Date.now();
+  const stale = await env.DB.prepare("SELECT id FROM discovery_album_covers WHERE (artwork_url='' OR updated_at < ?) AND last_attempt_at < ? ORDER BY position LIMIT 12")
+    .bind(now - 7 * 86400000, now - 3600000).all();
+  if (stale.results.length) {
+    const lease = await env.DB.prepare('UPDATE discovery_cover_refresh SET lease_until=? WHERE id=1 AND lease_until < ? RETURNING id').bind(now + 60000, now).first();
+    if (lease) {
+      const refresh = refreshAlbumCoverPool(env, stale.results).catch(error => console.error(JSON.stringify({ event: 'cover_pool_refresh_failed', message: String(error) })));
+      if (pool.results.length < 6) { await refresh; pool = await readPool(); }
+      else ctx.waitUntil(refresh);
+    }
+  }
+  const result = json(request, { albums: pool.results.map(album => ({ id: album.id, title: album.title, artist: album.artist, cover: album.artwork_url, sourceUrl: album.source_url })) });
+  result.headers.set('Cache-Control', pool.results.length ? 'public, max-age=300' : 'public, max-age=10');
+  return result;
+}
+
+async function route(request, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname;
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: responseHeaders(request, { 'Access-Control-Max-Age': '86400' }) });
+  if (path === '/api/discover/album-covers' && request.method === 'GET') return getAlbumCoverPool(request, env, ctx);
   const authResponse = await authRoutes(request, env, path);
   if (authResponse) return authResponse;
   const user = await getUser(request, env);
-  if (path === '/api/profile' && request.method === 'PUT') return user ? updateProfile(request, env, user) : fail(request, 'Entre na sua conta.', 401);
+  if ((path === '/api/profile' || path === '/api/auth/profile') && request.method === 'PUT') return user ? updateProfile(request, env, user) : fail(request, 'Entre na sua conta.', 401);
   if (path === '/api/lastfm' && request.method === 'GET') {
     const apiKey = env.LASTFM_API_SECRET;
     if (!apiKey) return fail(request, 'A busca Last.fm não está disponível.', 503);
@@ -441,11 +490,11 @@ async function route(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const origin = request.headers.get('Origin');
     if (origin && !allowedOrigins.has(origin)) return new Response('Origin not allowed', { status: 403 });
     try {
-      return await route(request, env);
+      return await route(request, env, ctx);
     } catch (error) {
       console.error(JSON.stringify({ event: 'api_error', message: error instanceof Error ? error.message : 'unknown' }));
       return fail(request, 'Não foi possível concluir a operação.', 500);
