@@ -69,6 +69,7 @@ async function getLibrary(request, env) {
       const firstTrackMetadata=parseMetadata(firstTrack?.metadata_json);
       return { id:album.id, title:album.title, artist:album.artist, trackIds,
         cover:mediaUrl(request,album.cover_key)||album.cover_url||firstTrackMetadata.coverUrl||mediaUrl(request,firstTrack?.cover_key)||'',
+        coverProof:parseMetadata(album.metadata_json).googleCoverProof||firstTrackMetadata.googleCoverProof||'',
         metadata:parseMetadata(album.metadata_json) };
     }),
     favorites: favoriteRows.results.map(row => row.track_id),
@@ -150,7 +151,12 @@ async function approvedImageUrl(env, value, proof) {
   const candidate=String(value||'').slice(0,2000);
   if(!/^https:\/\//i.test(candidate)||!proof||!env.GOOGLE_CSE_API_KEY)return '';
   const expected=await googleImageProof(env,candidate);
-  return expected===proof?candidate:'';
+  const encoder=new TextEncoder();
+  const [expectedHash,providedHash]=await Promise.all([
+    crypto.subtle.digest('SHA-256',encoder.encode(expected)),
+    crypto.subtle.digest('SHA-256',encoder.encode(String(proof))),
+  ]);
+  return crypto.subtle.timingSafeEqual(expectedHash,providedHash)?candidate:'';
 }
 
 async function googleImageSearch(request, env) {
@@ -249,6 +255,7 @@ async function route(request, env) {
     if (!current) return fail(request, 'Música não encontrada.', 404);
     const metadata = parseMetadata(current.metadata_json);
     metadata.coverUrl = coverUrl;
+    metadata.googleCoverProof = payload.coverProof || '';
     await env.DB.prepare('UPDATE tracks SET metadata_json = ? WHERE id = ?').bind(JSON.stringify(metadata), trackCoverMatch[1]).run();
     return json(request, { ok: true, coverUrl });
   }
