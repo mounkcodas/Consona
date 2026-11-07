@@ -246,6 +246,17 @@ async function route(request, env) {
   if (path === '/api/library' && request.method === 'GET') return getLibrary(request, env);
   if (path === '/api/covers/google' && request.method === 'GET') return googleImageSearch(request, env);
   if (path === '/api/tracks' && request.method === 'POST') return uploadTrack(request, env);
+  const trackLyricsMatch = path.match(/^\/api\/tracks\/([^/]+)\/lyrics$/);
+  if (trackLyricsMatch && request.method === 'PUT') {
+    const payload = await request.json();
+    if (typeof payload.lyrics !== 'string' || payload.lyrics.length > 20000) return fail(request, 'Letra inválida ou muito longa.');
+    const current = await env.DB.prepare('SELECT metadata_json FROM tracks WHERE id = ?').bind(trackLyricsMatch[1]).first();
+    if (!current) return fail(request, 'Música não encontrada.', 404);
+    const metadata = parseMetadata(current.metadata_json);
+    metadata.lyrics = payload.lyrics;
+    await env.DB.prepare('UPDATE tracks SET metadata_json = ? WHERE id = ?').bind(JSON.stringify(metadata), trackLyricsMatch[1]).run();
+    return json(request, { ok: true });
+  }
   const trackCoverMatch = path.match(/^\/api\/tracks\/([^/]+)\/cover$/);
   if (trackCoverMatch && request.method === 'PUT') {
     const payload = await request.json();
