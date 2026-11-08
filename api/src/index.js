@@ -440,6 +440,28 @@ async function route(request, env, ctx) {
     if (!response.ok || payload.error) return fail(request, 'Last.fm não encontrou esses dados.', response.status >= 400 && response.status < 600 ? response.status : 502);
     return json(request, payload);
   }
+  if (path === '/api/musicbrainz' && request.method === 'GET') {
+    if (!user) return fail(request, 'Entre na sua conta para consultar o MusicBrainz.', 401);
+    const entity = url.searchParams.get('entity') || '';
+    if (!['recording', 'release', 'release-group'].includes(entity)) return fail(request, 'Consulta MusicBrainz inválida.');
+    const id = url.searchParams.get('id') || '';
+    if (id && !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(id)) return fail(request, 'Identificador MusicBrainz inválido.');
+    const query = (url.searchParams.get('query') || '').trim().slice(0, 250);
+    const group = url.searchParams.get('release-group') || '';
+    if (group && !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(group)) return fail(request, 'Grupo de lançamento inválido.');
+    if (!id && !query && !(entity === 'release' && group)) return fail(request, 'Informe os dados da busca MusicBrainz.');
+    const inc = (url.searchParams.get('inc') || '').trim();
+    if (inc && !/^(?:genres|ratings|annotation|url-rels|recordings)(?: (?:genres|ratings|annotation|url-rels|recordings))*$/.test(inc)) return fail(request, 'Detalhes MusicBrainz inválidos.');
+    const limit = Math.min(25, Math.max(1, Number(url.searchParams.get('limit')) || 8));
+    const params = new URLSearchParams({ fmt: 'json', limit: String(limit) });
+    if (query) params.set('query', query);
+    if (group) params.set('release-group', group);
+    if (inc) params.set('inc', inc);
+    const target = `https://musicbrainz.org/ws/2/${entity}/${id}?${params}`;
+    const response = await fetch(target, { headers: { Accept: 'application/json', 'User-Agent': 'Consona/1.0 (https://consona.live)' }, signal: AbortSignal.timeout(12000) }).catch(() => null);
+    if (!response?.ok) return fail(request, 'O MusicBrainz está temporariamente indisponível.', response?.status === 429 || response?.status === 503 ? response.status : 502);
+    return json(request, await response.json());
+  }
   if (path === '/api/spotify/albums/search' && request.method === 'GET') {
     if (!user) return fail(request, 'Entre na sua conta para buscar álbuns.', 401);
     const query = (url.searchParams.get('q') || '').trim().slice(0, 180);
@@ -449,6 +471,15 @@ async function route(request, env, ctx) {
     const result = await spotifyCatalogGet(token, `search?${new URLSearchParams({ q: query, type: 'album', limit: '10', market: 'BR' })}`);
     if (!result) return fail(request, 'A busca no Spotify está temporariamente indisponível.', 502);
     return json(request, { albums: (result.albums?.items || []).filter(Boolean).map(item => ({ id: item.id, title: item.name, artist: (item.artists || []).map(artist => artist.name).join(', '), year: (item.release_date || '').slice(0, 4), coverUrl: item.images?.find(image => image.width >= 300)?.url || item.images?.[0]?.url || '', sourceUrl: item.external_urls?.spotify || '' })) });
+  }
+  const spotifyAlbumMatch = path.match(/^\/api\/spotify\/albums\/([A-Za-z0-9]+)$/);
+  if (spotifyAlbumMatch && request.method === 'GET') {
+    if (!user) return fail(request, 'Entre na sua conta para consultar álbuns.', 401);
+    const token = await spotifyCatalogToken(env);
+    if (!token) return fail(request, 'A busca no Spotify não está disponível.', 503);
+    const album = await spotifyCatalogGet(token, `albums/${spotifyAlbumMatch[1]}?market=BR`);
+    if (!album) return fail(request, 'Não foi possível consultar o álbum no Spotify.', 502);
+    return json(request, { releaseDate: album.release_date || '', releaseDatePrecision: album.release_date_precision || '' });
   }
   const spotifyTracksMatch = path.match(/^\/api\/spotify\/albums\/([A-Za-z0-9]+)\/tracks$/);
   if (spotifyTracksMatch && request.method === 'GET') {
