@@ -43,6 +43,6 @@ export async function findAlbums(title, artist) {
       const image = data?.images?.find(image => image.front);
       coverUrl = (image?.thumbnails?.['500'] || image?.thumbnails?.['250'] || '').replace(/^http:/, 'https:');
     } catch {}
-    return { title: item.title, artist: (item['artist-credit'] || []).map(credit => credit.name || credit.artist?.name).filter(Boolean).join(', '), coverUrl, releaseGroupId: item.id, year: (item['first-release-date'] || '').slice(0, 4) };
+    return { title: item.title, artist: (item['artist-credit'] || []).map(credit => credit.name || credit.artist?.name).filter(Boolean).join(', '), coverUrl, releaseGroupId: item.id, year: (item['first-release-date'] || '').slice(0, 4), source: 'MusicBrainz' };
   }));
 }

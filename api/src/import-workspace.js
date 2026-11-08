@@ -70,7 +70,7 @@ export async function importRoutes(request, env, user, helpers) {
         if (album.coverUrl && !coverUrl) return fail(request, `A capa de “${album.title}” não pôde ser validada. Escolha uma imagem do seu dispositivo.`);
         coverKey = null;
       }
-      const meta = { ...metadata(stored?.metadata_json), ...(album.releaseGroupId ? { releaseGroupId: album.releaseGroupId } : {}) };
+      const meta = { ...metadata(stored?.metadata_json), ...(album.releaseGroupId ? { releaseGroupId: album.releaseGroupId } : {}), ...(album.releaseYear ? { releaseYear: String(album.releaseYear).slice(0, 4), releaseYearSource: album.releaseYearSource || 'MusicBrainz' } : {}) };
       if (stored) statements.push(env.DB.prepare('UPDATE albums SET title=?,artist=?,cover_key=?,cover_url=?,metadata_json=? WHERE id=?').bind(album.title, album.artist, coverKey, coverUrl, JSON.stringify(meta), id));
       else statements.push(env.DB.prepare('INSERT INTO albums (id,title,artist,cover_key,cover_url,metadata_json,added_by) VALUES (?,?,?,?,?,?,?)').bind(id, album.title, album.artist, coverKey, coverUrl, JSON.stringify(meta), user.id));
     }
