@@ -98,3 +98,44 @@ export async function getAlbumTracklist(album, apiRequest, expectedTitles = []) 
   }).sort((a, b) => b.score - a.score || (a.release.date || '9999').localeCompare(b.release.date || '9999'));
   return { tracks: scored[0].tracks, source: 'MusicBrainz' };
 }
+
+export async function getAlbumDetails(album, apiRequest) {
+  const lastfm = album.artist ? apiRequest(`/api/lastfm?${new URLSearchParams({ method: 'album.getInfo', artist: album.artist, album: album.title })}`) : Promise.resolve({});
+  const ranking = album.artist ? apiRequest(`/api/lastfm?${new URLSearchParams({ method: 'artist.getTopAlbums', artist: album.artist, limit: '100' })}`) : Promise.resolve({});
+  const musicBrainzDetails = (async () => {
+    let groupId = album.metadata?.releaseGroupId;
+    if (!/^[a-f0-9-]{36}$/i.test(groupId || '')) {
+      const results = await musicBrainz('release-group', `releasegroup:"${escapeQuery(album.title)}"${album.artist ? ` AND artist:"${escapeQuery(album.artist)}"` : ''} AND primarytype:album`);
+      groupId = (results['release-groups'] || []).find(item => similarity(item.title, album.title) >= .9)?.id;
+    }
+    if (!groupId) return {};
+    const group = await musicBrainzRequest(`release-group/${groupId}`, { inc: 'genres ratings annotation' });
+    let language = '';
+    try {
+      const releases = await musicBrainzRequest('release/', { 'release-group': groupId, limit: '15' });
+      const preferred = (releases.releases || []).sort((a, b) => Number(b.status === 'Official') - Number(a.status === 'Official') || (a.date || '9999').localeCompare(b.date || '9999'));
+      language = preferred.find(release => release['text-representation']?.language)?.['text-representation']?.language || '';
+    } catch {}
+    return { releaseDate: group['first-release-date'] || '', language, genres: (group.genres || []).sort((a, b) => Number(b.count || 0) - Number(a.count || 0)).slice(0, 6).map(item => item.name), rating: group.rating?.value || '', ratingCount: group.rating?.['votes-count'] || 0, annotation: group.annotation || '' };
+  })();
+  const [fmResult, rankResult, mbResult] = await Promise.allSettled([lastfm, ranking, musicBrainzDetails]);
+  if (fmResult.status === 'rejected' && mbResult.status === 'rejected') throw new Error('Last.fm e MusicBrainz estão indisponíveis no momento.');
+  const fm = fmResult.status === 'fulfilled' ? fmResult.value.album || {} : {};
+  const chart = rankResult.status === 'fulfilled' ? rankResult.value.topalbums?.album || [] : [];
+  const mb = mbResult.status === 'fulfilled' ? mbResult.value : {};
+  const ranked = (Array.isArray(chart) ? chart : [chart]).find(item => normalize(item.name) === normalize(album.title));
+  const tags = fm.toptags?.tag || [];
+  const genres = (Array.isArray(tags) ? tags : [tags]).map(item => item.name).filter(Boolean).slice(0, 6);
+  return {
+    releaseDate: mb.releaseDate || fm.releasedate?.trim() || album.metadata?.releaseYear || '',
+    recordedDate: album.metadata?.recordedDate || '',
+    rank: ranked ? Number(ranked['@attr']?.rank) || (Array.isArray(chart) ? chart.indexOf(ranked) + 1 : 1) : null,
+    genres: genres.length ? genres : mb.genres || [],
+    description: fm.wiki?.content || fm.wiki?.summary || mb.annotation || album.metadata?.description || '',
+    language: mb.language || album.metadata?.language || '',
+    listeners: Number(fm.listeners) || 0,
+    playcount: Number(fm.playcount) || 0,
+    musicBrainzRating: mb.rating || '',
+    musicBrainzRatingCount: mb.ratingCount || 0,
+  };
+}

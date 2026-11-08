@@ -430,7 +430,7 @@ async function route(request, env, ctx) {
     const apiKey = env.LASTFM_API_SECRET;
     if (!apiKey) return fail(request, 'A busca Last.fm não está disponível.', 503);
     const method = url.searchParams.get('method') || '';
-    const allowedMethods = new Set(['track.getInfo', 'artist.getInfo', 'album.getInfo', 'track.getSimilar']);
+    const allowedMethods = new Set(['track.getInfo', 'artist.getInfo', 'artist.getTopAlbums', 'album.getInfo', 'track.getSimilar']);
     if (!allowedMethods.has(method)) return fail(request, 'Método Last.fm não permitido.');
     const params = new URLSearchParams({ method, api_key: apiKey, format: 'json' });
     for (const key of ['artist', 'track', 'album', 'limit']) { const value = (url.searchParams.get(key) || '').slice(0, 180); if (value) params.set(key, value); }
