@@ -30,6 +30,34 @@ export function groupDetected(draft) {
   });
   return { ...draft, tracks, albums };
 }
+function comparableTitle(value) {
+  return normalize(value).replace(/\b(remaster(?:ed)?|remix|version|edition|feat|featuring)\b.*$/, '').trim();
+}
+function titleScore(left, right) {
+  const a = comparableTitle(left), b = comparableTitle(right);
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i++) {
+    let diagonal = previous[0]; previous[0] = i;
+    for (let j = 1; j <= b.length; j++) { const above = previous[j]; previous[j] = Math.min(previous[j] + 1, previous[j - 1] + 1, diagonal + Number(a[i - 1] !== b[j - 1])); diagonal = above; }
+  }
+  return 1 - previous[b.length] / Math.max(a.length, b.length);
+}
+export function orderAlbumTracks(draft, albumKey, catalogTracks = []) {
+  const albumRows = draft.tracks.filter(row => row.albumKey === albumKey);
+  if (albumRows.length < 2) return { draft, matched: 0, total: albumRows.length };
+  const slots = [...catalogTracks].sort((a, b) => Number(a.disc || 1) - Number(b.disc || 1) || Number(a.position || 0) - Number(b.position || 0));
+  const pairs = albumRows.flatMap(row => slots.map((slot, index) => ({ row, index, score: row.metadata?.identification?.recordingId && row.metadata.identification.recordingId === slot.recordingId ? 1.1 : titleScore(row.title, slot.title) }))).filter(pair => pair.score >= .76).sort((a, b) => b.score - a.score);
+  const matchedRows = new Set(), matchedSlots = new Set(), positions = new Map();
+  for (const pair of pairs) { if (matchedRows.has(pair.row.key) || matchedSlots.has(pair.index)) continue; matchedRows.add(pair.row.key); matchedSlots.add(pair.index); positions.set(pair.row.key, pair.index); }
+  let ordered = [...albumRows];
+  if (positions.size) ordered.sort((a, b) => (positions.get(a.key) ?? Infinity) - (positions.get(b.key) ?? Infinity));
+  else if (!slots.length && albumRows.some(row => Number(row.trackNo || row.metadata?.id3?.track) > 0)) ordered.sort((a, b) => (Number(a.trackNo || a.metadata?.id3?.track) || Infinity) - (Number(b.trackNo || b.metadata?.id3?.track) || Infinity));
+  else return { draft, matched: 0, total: albumRows.length };
+  const iterator = ordered[Symbol.iterator]();
+  return { draft: { ...draft, tracks: draft.tracks.map(row => row.albumKey === albumKey ? iterator.next().value : row) }, matched: positions.size || ordered.filter(row => Number(row.trackNo || row.metadata?.id3?.track) > 0).length, total: albumRows.length };
+}
 export function validateDraft(draft, libraryTracks = []) {
   const issues = [], hashes = new Map();
   for (const album of draft.albums) {

@@ -247,9 +247,22 @@ async function uploadTrack(request, env, user, staged = false) {
 function safeRemoteImage(value) {
   try {
     const url = new URL(String(value || ''));
-    const allowedHost = ['upload.wikimedia.org', 'coverartarchive.org', 'lastfm.freetls.fastly.net', 'lastfm-img2.akamaized.net'].includes(url.hostname) || /^encrypted-tbn\d+\.gstatic\.com$/.test(url.hostname);
+    const allowedHost = ['upload.wikimedia.org', 'coverartarchive.org', 'lastfm.freetls.fastly.net', 'lastfm-img2.akamaized.net', 'i.scdn.co'].includes(url.hostname) || /^encrypted-tbn\d+\.gstatic\.com$/.test(url.hostname);
     return url.protocol === 'https:' && allowedHost ? url.href.slice(0, 2000) : '';
   } catch { return ''; }
+}
+
+async function spotifyCatalogToken(env) {
+  if (!env.SPOTIFY_CLIENT_ID || !env.SPOTIFY_CLIENT_SECRET) return '';
+  const credentials = btoa(`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`);
+  const response = await fetch('https://accounts.spotify.com/api/token', { method: 'POST', headers: { Authorization: `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=client_credentials' }).catch(() => null);
+  if (!response?.ok) return '';
+  return (await response.json().catch(() => ({}))).access_token || '';
+}
+
+async function spotifyCatalogGet(token, path) {
+  const response = await fetch(`https://api.spotify.com/v1/${path}`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null);
+  return response?.ok ? response.json().catch(() => null) : null;
 }
 
 async function googleImageProof(env, url) {
@@ -426,6 +439,31 @@ async function route(request, env, ctx) {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload.error) return fail(request, 'Last.fm não encontrou esses dados.', response.status >= 400 && response.status < 600 ? response.status : 502);
     return json(request, payload);
+  }
+  if (path === '/api/spotify/albums/search' && request.method === 'GET') {
+    if (!user) return fail(request, 'Entre na sua conta para buscar álbuns.', 401);
+    const query = (url.searchParams.get('q') || '').trim().slice(0, 180);
+    if (query.length < 2) return fail(request, 'Informe o nome do álbum.');
+    const token = await spotifyCatalogToken(env);
+    if (!token) return fail(request, 'A busca no Spotify não está disponível.', 503);
+    const result = await spotifyCatalogGet(token, `search?${new URLSearchParams({ q: query, type: 'album', limit: '10', market: 'BR' })}`);
+    if (!result) return fail(request, 'A busca no Spotify está temporariamente indisponível.', 502);
+    return json(request, { albums: (result.albums?.items || []).filter(Boolean).map(item => ({ id: item.id, title: item.name, artist: (item.artists || []).map(artist => artist.name).join(', '), year: (item.release_date || '').slice(0, 4), coverUrl: item.images?.find(image => image.width >= 300)?.url || item.images?.[0]?.url || '', sourceUrl: item.external_urls?.spotify || '' })) });
+  }
+  const spotifyTracksMatch = path.match(/^\/api\/spotify\/albums\/([A-Za-z0-9]+)\/tracks$/);
+  if (spotifyTracksMatch && request.method === 'GET') {
+    if (!user) return fail(request, 'Entre na sua conta para ordenar álbuns.', 401);
+    const token = await spotifyCatalogToken(env);
+    if (!token) return fail(request, 'A busca no Spotify não está disponível.', 503);
+    const tracks = [];
+    for (let offset = 0; offset < 500; offset += 50) {
+      const page = await spotifyCatalogGet(token, `albums/${spotifyTracksMatch[1]}/tracks?${new URLSearchParams({ limit: '50', offset: String(offset), market: 'BR' })}`);
+      if (!page) return fail(request, 'Não foi possível ler a ordem das faixas no Spotify.', 502);
+      const items = page.items || [];
+      tracks.push(...items.filter(Boolean).map(item => ({ title: item.name, disc: item.disc_number || 1, position: item.track_number || 0, recordingId: '' })));
+      if (items.length < 50 || tracks.length >= (page.total || 0)) break;
+    }
+    return json(request, { tracks, source: 'Spotify' });
   }
   if (path === '/api/health' && request.method === 'GET') return json(request, { ok: true });
   if (path === '/api/library' && request.method === 'GET') return user ? getLibrary(request, env, user) : fail(request, 'Entre na sua conta para acessar a biblioteca.', 401);

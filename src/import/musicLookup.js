@@ -1,17 +1,30 @@
 import { normalize } from './model.js';
 let nextSearchAt = 0;
-async function musicBrainz(path, query) {
+async function musicBrainzRequest(path, params) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const wait = Math.max(0, nextSearchAt - Date.now());
     nextSearchAt = Date.now() + wait + 1100;
     if (wait) await new Promise(resolve => setTimeout(resolve, wait));
-    const response = await fetch(`https://musicbrainz.org/ws/2/${path}/?${new URLSearchParams({ query, fmt: 'json', limit: '5' })}`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(12000) });
+    const response = await fetch(`https://musicbrainz.org/ws/2/${path}?${new URLSearchParams({ ...params, fmt: 'json' })}`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(12000) });
     if (response.ok) return response.json();
     if (![429, 503].includes(response.status) || attempt === 2) throw new Error('A busca está temporariamente indisponível. Tente novamente.');
     nextSearchAt = Math.max(nextSearchAt, Date.now() + 1600 * (attempt + 1));
   }
 }
+const musicBrainz = (path, query) => musicBrainzRequest(`${path}/`, { query, limit: '8' });
 const escapeQuery = value => String(value || '').replace(/["\\]/g, ' ');
+const words = value => normalize(value).split(' ').filter(Boolean);
+function similarity(a, b) {
+  const left = normalize(a), right = normalize(b);
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i++) {
+    let diagonal = previous[0]; previous[0] = i;
+    for (let j = 1; j <= right.length; j++) { const above = previous[j]; previous[j] = Math.min(previous[j] + 1, previous[j - 1] + 1, diagonal + Number(left[i - 1] !== right[j - 1])); diagonal = above; }
+  }
+  return Math.max(0, 1 - previous[right.length] / Math.max(left.length, right.length));
+}
 export async function identifyTrack(row, apiRequest) {
   const query = `recording:"${escapeQuery(row.title)}"${row.artist ? ` AND artist:"${escapeQuery(row.artist)}"` : ''}`;
   let candidates = [], lastfm;
@@ -33,16 +46,55 @@ export async function identifyTrack(row, apiRequest) {
   if (!candidates.length) throw new Error('Nenhuma correspondência encontrada. Você pode preencher os dados manualmente.');
   return candidates;
 }
-export async function findAlbums(title, artist) {
-  const payload = await musicBrainz('release-group', `releasegroup:"${escapeQuery(title)}"${artist ? ` AND artist:"${escapeQuery(artist)}"` : ''} AND primarytype:album`);
-  return Promise.all((payload['release-groups'] || []).map(async item => {
+export async function findAlbums(title, artist, apiRequest) {
+  const candidates = new Map();
+  let mbError;
+  const queries = [
+    `releasegroup:"${escapeQuery(title)}"${artist ? ` AND artist:"${escapeQuery(artist)}"` : ''} AND primarytype:album`,
+    words(title).length ? `releasegroup:${words(title).map(word => `${escapeQuery(word)}~`).join(' AND releasegroup:')} AND primarytype:album` : '',
+  ];
+  for (const query of queries) {
+    if (!query) continue;
+    try {
+      const payload = await musicBrainz('release-group', query);
+      for (const item of payload['release-groups'] || []) candidates.set(item.id, { title: item.title, artist: (item['artist-credit'] || []).map(credit => credit.name || credit.artist?.name).filter(Boolean).join(', '), coverUrl: '', releaseGroupId: item.id, year: (item['first-release-date'] || '').slice(0, 4), source: 'MusicBrainz' });
+      if ([...candidates.values()].some(item => similarity(title, item.title) > .94 && (!artist || similarity(artist, item.artist) > .75))) break;
+    } catch (error) { mbError = error; }
+  }
+  if (apiRequest && ![...candidates.values()].some(item => similarity(title, item.title) > .94 && (!artist || similarity(artist, item.artist) > .75))) {
+    try {
+      let spotify = await apiRequest(`/api/spotify/albums/search?${new URLSearchParams({ q: `${title} ${artist}`.trim() })}`);
+      if (!spotify.albums?.length && artist) spotify = await apiRequest(`/api/spotify/albums/search?${new URLSearchParams({ q: title })}`);
+      for (const item of spotify.albums || []) candidates.set(`spotify:${item.id}`, { ...item, spotifyId: item.id, source: 'Spotify' });
+    } catch { /* MusicBrainz results remain available when Spotify is unavailable. */ }
+  }
+  const ranked = [...candidates.values()].map(item => ({ ...item, matchScore: similarity(title, item.title) * .8 + (artist ? similarity(artist, item.artist) * .2 : .2) })).filter(item => item.matchScore >= .4).sort((a, b) => b.matchScore - a.matchScore).slice(0, 8);
+  if (!ranked.length && mbError) throw mbError;
+  return Promise.all(ranked.map(async item => {
+    if (!item.releaseGroupId) return item;
     let coverUrl = '';
     try {
-      const response = await fetch(`https://coverartarchive.org/release-group/${item.id}`, { signal: AbortSignal.timeout(8000) });
+      const response = await fetch(`https://coverartarchive.org/release-group/${item.releaseGroupId}`, { signal: AbortSignal.timeout(8000) });
       const data = response.ok ? await response.json() : null;
       const image = data?.images?.find(image => image.front);
       coverUrl = (image?.thumbnails?.['500'] || image?.thumbnails?.['250'] || '').replace(/^http:/, 'https:');
     } catch {}
-    return { title: item.title, artist: (item['artist-credit'] || []).map(credit => credit.name || credit.artist?.name).filter(Boolean).join(', '), coverUrl, releaseGroupId: item.id, year: (item['first-release-date'] || '').slice(0, 4), source: 'MusicBrainz' };
+    return { ...item, coverUrl };
   }));
+}
+
+export async function getAlbumTracklist(album, apiRequest, expectedTitles = []) {
+  if (album.spotifyId) return apiRequest(`/api/spotify/albums/${album.spotifyId}/tracks`);
+  if (!album.releaseGroupId) throw new Error('Busque e selecione um álbum antes de ordenar.');
+  const payload = await musicBrainzRequest('release/', { 'release-group': album.releaseGroupId, inc: 'recordings', limit: '25' });
+  const releases = (payload.releases || []).filter(release => release.media?.some(medium => medium.tracks?.length));
+  if (!releases.length) throw new Error('Nenhuma lista de faixas foi encontrada para esse álbum.');
+  const expected = expectedTitles.map(normalize);
+  const scored = releases.map(release => {
+    const tracks = (release.media || []).flatMap((medium, disc) => (medium.tracks || []).map((track, index) => ({ title: track.title || track.recording?.title || '', recordingId: track.recording?.id || '', disc: medium.position || disc + 1, position: track.position || index + 1 })));
+    const matches = expected.filter(title => tracks.some(track => similarity(title, track.title) >= .76)).length;
+    const countDifference = Math.abs(tracks.length - expected.length);
+    return { release, tracks, score: matches * 5 - countDifference + Number(release.status === 'Official') * 2 };
+  }).sort((a, b) => b.score - a.score || (a.release.date || '9999').localeCompare(b.release.date || '9999'));
+  return { tracks: scored[0].tracks, source: 'MusicBrainz' };
 }

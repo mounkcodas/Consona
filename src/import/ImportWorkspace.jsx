@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { AlertCircle, ArrowDown, ArrowUp, Check, Disc3, FolderOpen, GripVertical, Library, LoaderCircle, Music2, Plus, Redo2, Save, Search, Undo2, Upload, WandSparkles, X } from 'lucide-react';
+import { AlertCircle, ArrowDown, ArrowUp, Check, Disc3, FolderOpen, GripVertical, Library, ListOrdered, LoaderCircle, Music2, Plus, Redo2, Save, Search, Undo2, Upload, WandSparkles, X } from 'lucide-react';
 import { clearDraftAssets, getAsset, loadDraft, persistDraft, putAsset } from './draftStore.js';
-import { filenameMetadata, groupDetected, historyReducer, moveTracks, newDraft, normalize, validateDraft } from './model.js';
-import { findAlbums, identifyTrack } from './musicLookup.js';
+import { filenameMetadata, groupDetected, historyReducer, moveTracks, newDraft, normalize, orderAlbumTracks, validateDraft } from './model.js';
+import { findAlbums, getAlbumTracklist, identifyTrack } from './musicLookup.js';
 
 function Cover({ fileKey, url, title = '' }) {
   const [local, setLocal] = useState('');
@@ -14,6 +14,7 @@ function Cover({ fileKey, url, title = '' }) {
   }, [fileKey]);
   return <span className="organizer-cover">{local || url ? <img src={local || url} alt={title} onError={event => { event.currentTarget.style.visibility = 'hidden'; }}/>:<Disc3 size={24}/>}</span>;
 }
+function SpotifyMark() { return <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#1ed760"/><path d="M5 8c4.5-1.5 10-1.2 14 1M6 12c4-1.1 8.7-.7 12 1.2M7 16c3.2-.7 6.7-.4 9.5 1" fill="none" stroke="#103923" strokeWidth="1.6" strokeLinecap="round"/></svg>; }
 const jsonOptions = value => ({ headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
 
 export default function ImportWorkspace({ userId, library, apiRequest, readTags, readDuration, onLibraryChange }) {
@@ -25,6 +26,7 @@ export default function ImportWorkspace({ userId, library, apiRequest, readTags,
   const [review, setReview] = useState(false), [acknowledged, setAcknowledged] = useState(false), [discard, setDiscard] = useState(false);
   const [showCatalog, setShowCatalog] = useState(false), [catalogQuery, setCatalogQuery] = useState(''), [catalogAlbums, setCatalogAlbums] = useState(false);
   const [albumResults, setAlbumResults] = useState({}), [rowStatus, setRowStatus] = useState({}), [albumBusy, setAlbumBusy] = useState('');
+  const [albumFeedback, setAlbumFeedback] = useState({});
   const [dropTarget, setDropTarget] = useState(null);
   const fileInput = useRef(null), folderInput = useRef(null), lastSelected = useRef(null), cancelSearch = useRef(false), mounted = useRef(true);
   const reviewRef = useRef(null);
@@ -78,7 +80,7 @@ export default function ImportWorkspace({ userId, library, apiRequest, readTags,
     finally { if (mounted.current) { change(working); setJob(''); } }
   }
   function addAlbum() {
-    const album = { key: crypto.randomUUID(), title: '', artist: '', coverUrl: '', coverFileKey: '', existingId: '', lookupYear: true };
+    const album = { key: crypto.randomUUID(), title: '', artist: '', coverUrl: '', coverFileKey: '', existingId: '' };
     change(value => ({ ...value, albums: [...value.albums, album] }));
   }
   function catalogRow(track, albumKey = '') {
@@ -86,7 +88,7 @@ export default function ImportWorkspace({ userId, library, apiRequest, readTags,
   }
   function addExistingAlbum(album) {
     if (draft.albums.some(item => item.existingId === album.id)) return;
-    const card = { key: crypto.randomUUID(), existingId: album.id, title: album.title, artist: album.artist, coverUrl: album.cover, initialTitle: album.title, initialArtist: album.artist, initialCover: album.cover };
+    const card = { key: crypto.randomUUID(), existingId: album.id, title: album.title, artist: album.artist, coverUrl: album.cover, initialTitle: album.title, initialArtist: album.artist, initialCover: album.cover, releaseGroupId: album.metadata?.releaseGroupId || '', spotifyId: album.metadata?.spotifyId || '', releaseYear: album.metadata?.releaseYear || '', releaseYearSource: album.metadata?.releaseYearSource || '', sourceUrl: album.metadata?.sourceUrl || '' };
     const missing = (album.trackIds || []).filter(id => !draft.tracks.some(row => row.existingId === id)).map(id => library.tracks.find(track => track.id === id)).filter(Boolean).map(track => catalogRow(track, card.key));
     change(value => ({ ...value, albums: [...value.albums, card], tracks: [...value.tracks, ...missing] }));
     setCatalogAlbums(false);
@@ -135,8 +137,36 @@ export default function ImportWorkspace({ userId, library, apiRequest, readTags,
   async function searchAlbum(album) {
     if (!album.title.trim()) { setMessage('Informe o nome do álbum antes de buscar a capa.'); return; }
     setAlbumBusy(album.key);
-    try { const results = await findAlbums(album.title, album.artist); setAlbumResults(value => ({ ...value, [album.key]: results })); if (!results.length) setMessage('Nenhum álbum encontrado. Preencha os dados e escolha uma capa manualmente.'); }
+    try { const results = await findAlbums(album.title, album.artist, apiRequest); setAlbumResults(value => ({ ...value, [album.key]: results })); setAlbumFeedback(value => ({ ...value, [album.key]: results.length ? 'Escolha a edição correta. O ano e a capa serão aplicados juntos.' : 'Nenhuma opção encontrada. Confira o nome e tente novamente.' })); }
     catch (error) { setMessage(error.message); }
+    finally { setAlbumBusy(''); }
+  }
+  async function sortAlbum(album) {
+    const rows = latest.current.tracks.filter(row => row.albumKey === album.key);
+    if (rows.length < 2) return;
+    setAlbumBusy(album.key);
+    const sortFromTags = () => {
+      const tagged = orderAlbumTracks(latest.current, album.key, []);
+      if (!tagged.matched) return false;
+      change(value => orderAlbumTracks(value, album.key, []).draft);
+      setAlbumFeedback(value => ({ ...value, [album.key]: `${tagged.matched} de ${tagged.total} faixas ordenadas pelos números gravados nos arquivos. Revise a sequência antes de salvar.` }));
+      return true;
+    };
+    try {
+      let chosen = album;
+      if (!chosen.releaseGroupId && !chosen.spotifyId) {
+        const results = await findAlbums(album.title, album.artist, apiRequest);
+        if (!results.length) { if (!sortFromTags()) setAlbumFeedback(value => ({ ...value, [album.key]: 'Não encontrei a edição nem números de faixa nos arquivos. Revise o nome do álbum.' })); return; }
+        if (results[0].matchScore < .88) { setAlbumResults(value => ({ ...value, [album.key]: results })); setAlbumFeedback(value => ({ ...value, [album.key]: 'Escolha o álbum correto antes de ordenar as faixas.' })); return; }
+        chosen = results[0];
+        patchAlbum(album.key, { title: chosen.title, artist: chosen.artist, coverUrl: album.coverUrl || chosen.coverUrl, releaseGroupId: chosen.releaseGroupId || '', spotifyId: chosen.spotifyId || '', releaseYear: chosen.year || '', releaseYearSource: chosen.source, sourceUrl: chosen.sourceUrl || '' });
+      }
+      const listing = await getAlbumTracklist(chosen, apiRequest, rows.map(row => row.title));
+      const result = orderAlbumTracks(latest.current, album.key, listing.tracks);
+      if (!result.matched) { if (!sortFromTags()) setAlbumFeedback(value => ({ ...value, [album.key]: 'A edição foi encontrada, mas nenhuma faixa correspondeu. Revise nomes ou escolha outra edição.' })); return; }
+      change(value => orderAlbumTracks(value, album.key, listing.tracks).draft);
+      setAlbumFeedback(value => ({ ...value, [album.key]: `${result.matched} de ${result.total} faixas ordenadas pela edição do ${listing.source}. ${result.matched < result.total ? 'As demais foram mantidas no fim para revisão.' : ''}` }));
+    } catch (error) { if (!sortFromTags()) setAlbumFeedback(value => ({ ...value, [album.key]: error.message })); }
     finally { setAlbumBusy(''); }
   }
   async function save() {
@@ -176,7 +206,7 @@ export default function ImportWorkspace({ userId, library, apiRequest, readTags,
         await persistDraft(userId, working); dispatch({ type: 'restore', value: working });
       }
       setJob('Salvando organização…');
-      const payload = { batchId: working.batchId, albums: working.albums.map(({ key, existingId, title, artist, coverUrl, uploadedCoverId, releaseGroupId, releaseYear, lookupYear, initialTitle, initialArtist, initialCover }) => ({ key, existingId, title, artist, coverUrl: uploadedCoverId ? '' : coverUrl, coverAssetId: uploadedCoverId, releaseGroupId, releaseYear: lookupYear === false ? '' : releaseYear, releaseYearSource: 'MusicBrainz', initialTitle, initialArtist, initialCover })), tracks: working.tracks.map(row => ({ id: row.existingId || row.uploadedId, albumKey: row.albumKey, title: row.title, artist: row.artist, coverMode: row.coverMode || 'album', identification: row.metadata?.identification || null, coverAssetId: row.uploadedIndividualCoverId || '' })) };
+      const payload = { batchId: working.batchId, albums: working.albums.map(({ key, existingId, title, artist, coverUrl, uploadedCoverId, releaseGroupId, spotifyId, releaseYear, releaseYearSource, sourceUrl, initialTitle, initialArtist, initialCover }) => ({ key, existingId, title, artist, coverUrl: uploadedCoverId ? '' : coverUrl, coverAssetId: uploadedCoverId, releaseGroupId, spotifyId, releaseYear, releaseYearSource, sourceUrl, initialTitle, initialArtist, initialCover })), tracks: working.tracks.map(row => ({ id: row.existingId || row.uploadedId, albumKey: row.albumKey, title: row.title, artist: row.artist, coverMode: row.coverMode || 'album', identification: row.metadata?.identification || null, coverAssetId: row.uploadedIndividualCoverId || '' })) };
       await apiRequest('/api/import/commit', { method: 'POST', ...jsonOptions(payload) });
       const next = newDraft(); await persistDraft(userId, next); dispatch({ type: 'restore', value: next });
       await clearDraftAssets(userId, working.batchId);
@@ -218,10 +248,11 @@ export default function ImportWorkspace({ userId, library, apiRequest, readTags,
       <section className={`organizer-pool organizer-column ${dropTarget === '' ? 'is-drop-target' : ''}`} onDragOver={event => { event.preventDefault(); setDropTarget(''); }} onDrop={event => drop(event, '')}><header><Music2 size={19}/><div><h3>Músicas para organizar</h3><small>Solte arquivos aqui ou selecione MP3s</small></div><button disabled={!!job} onClick={() => fileInput.current.click()} aria-label="Adicionar arquivos ao rascunho"><Plus size={18}/></button></header><div className="organizer-column-tracks">{draft.tracks.filter(row => !row.albumKey).map(row => renderTrack(row))}{!draft.tracks.some(row => !row.albumKey) && <div className="organizer-empty"><Upload size={30}/><strong>Seu próximo álbum começa aqui</strong><p>Adicione os arquivos, preencha nome e artista ou use a identificação automática.</p><button disabled={!!job} onClick={() => fileInput.current.click()}>Selecionar MP3s</button></div>}</div></section>
       {draft.albums.map(album => <section key={album.key} className={`organizer-column organizer-album ${dropTarget === album.key ? 'is-drop-target' : ''}`} onDragOver={event => { event.preventDefault(); setDropTarget(album.key); }} onDrop={event => drop(event, album.key)}>
         <header><Cover fileKey={album.coverFileKey} url={album.coverUrl}/><div><span className="organizer-album-kind">{album.existingId ? 'DA BIBLIOTECA' : 'NOVO ÁLBUM'}</span><input aria-label={`Nome do álbum ${album.key}`} disabled={!!job} placeholder="Nome do álbum" value={album.title} onChange={event => patchAlbum(album.key, { title: event.target.value }, 'title')}/><input aria-label={`Artista do álbum ${album.key}`} disabled={!!job} placeholder="Nome do artista" value={album.artist} onChange={event => patchAlbum(album.key, { artist: event.target.value }, 'artist')}/></div><button disabled={!!job} aria-label={`Retirar álbum ${album.title || 'sem nome'} do rascunho`} onClick={() => change(value => ({ ...value, albums: value.albums.filter(item => item.key !== album.key), tracks: value.tracks.map(row => row.albumKey === album.key ? { ...row, albumKey: '' } : row) }))}><X size={15}/></button></header>
-        <div className="organizer-album-tools"><button disabled={!!job || !!albumBusy} onClick={() => searchAlbum(album)}><Search size={13}/>{albumBusy === album.key ? 'Buscando…' : 'Encontrar álbum e capa'}</button><label><Upload size={13}/>Escolher capa<input type="file" accept="image/png,image/jpeg,image/webp,image/avif" disabled={!!job} onChange={event => setCoverFile(album, event.target.files?.[0])}/></label></div>
-        {!album.existingId && <label className="organizer-lookup-year"><input type="checkbox" checked={album.lookupYear !== false} onChange={event => patchAlbum(album.key, { lookupYear: event.target.checked })}/>Buscar ano de lançamento na identificação (MusicBrainz)</label>}
-        {album.releaseYear && <small className="organizer-release-age">Lançado em {album.releaseYear} · {Math.max(0, new Date().getFullYear() - Number(album.releaseYear))} anos</small>}
-        {!!albumResults[album.key]?.length && <div className="organizer-album-results">{albumResults[album.key].map((item, index) => <button key={index} onClick={() => { patchAlbum(album.key, { title: item.title, artist: item.artist, coverUrl: item.coverUrl, coverFileKey: '', uploadedCoverId: '', releaseGroupId: item.releaseGroupId, releaseYear: album.lookupYear === false ? '' : item.year, releaseYearSource: item.source || 'MusicBrainz' }); setAlbumResults(value => ({ ...value, [album.key]: [] })); }}><Cover url={item.coverUrl}/><span>{item.title}<small>{item.artist} · {item.year || 'Sem ano'}</small><small>{item.coverUrl ? 'Usar dados e capa' : 'Usar dados · sem capa'}</small></span></button>)}</div>}
+        <div className="organizer-album-tools"><button disabled={!!job || !!albumBusy} onClick={() => searchAlbum(album)}><Search size={13}/>{albumBusy === album.key ? 'Buscando…' : 'Encontrar álbum, ano e capa'}</button><label><Upload size={13}/>Escolher capa<input type="file" accept="image/png,image/jpeg,image/webp,image/avif" disabled={!!job} onChange={event => setCoverFile(album, event.target.files?.[0])}/></label></div>
+        <div className="organizer-album-order"><button disabled={!!job || !!albumBusy || draft.tracks.filter(row => row.albumKey === album.key).length < 2} onClick={() => sortAlbum(album)}><ListOrdered size={14}/>Ordenar faixas pelo álbum</button></div>
+        {(album.releaseYear || album.sourceUrl) && <small className="organizer-release-age">{album.releaseYear ? `Lançado em ${album.releaseYear} · ${Math.max(0, new Date().getFullYear() - Number(album.releaseYear))} anos` : 'Ano de lançamento indisponível'} {album.sourceUrl && <a href={album.sourceUrl} target="_blank" rel="noreferrer"><SpotifyMark/>Ver no Spotify</a>}</small>}
+        {albumFeedback[album.key] && <small className="organizer-album-feedback" role="status">{albumFeedback[album.key]}</small>}
+        {!!albumResults[album.key]?.length && <div className="organizer-album-results">{albumResults[album.key].map((item, index) => <div className="organizer-album-result" key={`${item.source}-${item.releaseGroupId || item.spotifyId || index}`}><button onClick={() => { patchAlbum(album.key, { title: item.title, artist: item.artist, coverUrl: item.coverUrl || album.coverUrl, coverFileKey: item.coverUrl ? '' : album.coverFileKey, uploadedCoverId: item.coverUrl ? '' : album.uploadedCoverId, releaseGroupId: item.releaseGroupId || '', spotifyId: item.spotifyId || '', releaseYear: item.year || '', releaseYearSource: item.source, sourceUrl: item.sourceUrl || '' }); setAlbumResults(value => ({ ...value, [album.key]: [] })); setAlbumFeedback(value => ({ ...value, [album.key]: 'Álbum identificado. Você já pode ordenar as faixas.' })); }}><Cover url={item.coverUrl}/><span>{item.title}<small>{item.artist} · {item.year || 'Sem ano'} · {item.source}</small><small>{item.matchScore < .88 ? 'Correspondência aproximada · revise antes de usar' : item.coverUrl ? 'Usar dados e capa' : 'Usar dados · sem capa'}</small></span></button>{item.sourceUrl && <a href={item.sourceUrl} target="_blank" rel="noreferrer"><SpotifyMark/>Spotify</a>}</div>)}</div>}
         <div className="organizer-column-tracks">{draft.tracks.filter(row => row.albumKey === album.key).map(row => renderTrack(row, album))}{!draft.tracks.some(row => row.albumKey === album.key) && <div className="organizer-album-drop"><Disc3 size={28}/><p>Arraste músicas para este álbum.</p><small>Elas passam a herdar a capa dele.</small></div>}</div>
       </section>)}
       {!draft.albums.length && <button className="organizer-add-album" disabled={!!job} onClick={addAlbum}><Plus size={35}/><strong>Crie um álbum para receber suas músicas</strong><span>Você também pode usar um álbum da biblioteca.</span></button>}

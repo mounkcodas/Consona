@@ -70,7 +70,7 @@ export async function importRoutes(request, env, user, helpers) {
         if (album.coverUrl && !coverUrl) return fail(request, `A capa de “${album.title}” não pôde ser validada. Escolha uma imagem do seu dispositivo.`);
         coverKey = null;
       }
-      const meta = { ...metadata(stored?.metadata_json), ...(album.releaseGroupId ? { releaseGroupId: album.releaseGroupId } : {}), ...(album.releaseYear ? { releaseYear: String(album.releaseYear).slice(0, 4), releaseYearSource: album.releaseYearSource || 'MusicBrainz' } : {}) };
+      const meta = { ...metadata(stored?.metadata_json), releaseGroupId: album.releaseGroupId ? String(album.releaseGroupId).slice(0, 60) : '', spotifyId: album.spotifyId ? String(album.spotifyId).slice(0, 40) : '', releaseYear: album.releaseYear && /^\d{4}$/.test(String(album.releaseYear)) ? String(album.releaseYear) : '', releaseYearSource: album.releaseYearSource === 'Spotify' ? 'Spotify' : 'MusicBrainz', sourceUrl: album.sourceUrl && /^https:\/\/open\.spotify\.com\/album\/[A-Za-z0-9]+/.test(album.sourceUrl) ? String(album.sourceUrl).slice(0, 200) : '' };
       if (stored) statements.push(env.DB.prepare('UPDATE albums SET title=?,artist=?,cover_key=?,cover_url=?,metadata_json=? WHERE id=?').bind(album.title, album.artist, coverKey, coverUrl, JSON.stringify(meta), id));
       else statements.push(env.DB.prepare('INSERT INTO albums (id,title,artist,cover_key,cover_url,metadata_json,added_by) VALUES (?,?,?,?,?,?,?)').bind(id, album.title, album.artist, coverKey, coverUrl, JSON.stringify(meta), user.id));
     }

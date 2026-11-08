@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { filenameMetadata, groupDetected, historyReducer, moveTracks, newDraft, validateDraft } from './model.js';
+import { filenameMetadata, groupDetected, historyReducer, moveTracks, newDraft, orderAlbumTracks, validateDraft } from './model.js';
 
 test('28 mixed tracks can be grouped into three independent albums', () => {
   const draft = newDraft();
@@ -37,4 +37,18 @@ test('compilation grouping uses album artist and does not split guest artists', 
 });
 test('filename parsing preserves a title containing separators', () => {
   assert.deepEqual(filenameMetadata({ name: '02. Radiohead - Exit Music - Live.mp3' }), { title: 'Exit Music - Live', artist: 'Radiohead', albumHint: '' });
+});
+test('album order follows catalog positions and leaves unmatched songs in place after matches', () => {
+  const draft = { albums: [{ key: 'album' }], tracks: [
+    { key: 'third', albumKey: 'album', title: 'Third song' },
+    { key: 'other', albumKey: 'other', title: 'Keep me' },
+    { key: 'unknown', albumKey: 'album', title: 'Unreleased demo' },
+    { key: 'first', albumKey: 'album', title: 'First song' },
+    { key: 'second', albumKey: 'album', title: 'Second song (Remastered)' },
+  ] };
+  const catalog = [{ title: 'Second song', disc: 1, position: 2 }, { title: 'Third song', disc: 1, position: 3 }, { title: 'First song', disc: 1, position: 1 }];
+  const result = orderAlbumTracks(draft, 'album', catalog);
+  assert.equal(result.matched, 3);
+  assert.deepEqual(result.draft.tracks.map(row => row.key), ['first', 'other', 'second', 'third', 'unknown']);
+  assert.deepEqual(draft.tracks.map(row => row.key), ['third', 'other', 'unknown', 'first', 'second']);
 });
