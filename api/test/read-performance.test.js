@@ -23,7 +23,7 @@ function sqlStatements(sql) {
 
 test('library caching preserves behavior while bounding D1 reads', async t => {
   const mf = new Miniflare(convertV4MiniflareOptions({ modules: [
-    'api/test/worker-harness.js', 'api/src/index.js', 'api/src/import-workspace.js', 'api/src/library-cache.js',
+    'api/test/worker-harness.js', 'api/src/index.js', 'api/src/import-workspace.js', 'api/src/library-cache.js', 'api/src/social-api.js', 'api/src/social-core.js', 'api/src/social-realtime.js',
   ].map(path => ({ type: 'ESModule', path: resolve(path) })),
     compatibilityDate: '2026-11-03', d1Databases: ['DB'], r2Buckets: ['MEDIA'] }));
   t.after(() => mf.dispose());

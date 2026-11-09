@@ -3,7 +3,13 @@
   "name": "playmusic-library-api",
   "main": "src/index.js",
   "compatibility_date": "2026-11-03",
-  "observability": { "enabled": true, "head_sampling_rate": 0.1, "traces": { "enabled": true, "head_sampling_rate": 0.1 } },
+  "observability": { "enabled": true, "head_sampling_rate": 0.1, "redact_query_string": true, "traces": { "enabled": true, "head_sampling_rate": 0.1 } },
+  "durable_objects": { "bindings": [
+    { "name": "SOCIAL", "class_name": "SocialUser" },
+    { "name": "LISTENING", "class_name": "ListeningSession" }
+  ] },
+  "migrations": [{ "tag": "social-v1", "new_sqlite_classes": ["SocialUser", "ListeningSession"] }],
+  "triggers": { "crons": ["17 * * * *"] },
   "r2_buckets": [
     { "binding": "MEDIA", "bucket_name": "playmusic-library" }
   ],

@@ -20,7 +20,7 @@ export function createApiClient(base, { fetcher = fetch, getSession = () => sess
     if (session !== sessionKey) reset(session);
     const method = (options.method || 'GET').toUpperCase();
     const isLibrary = path === '/api/library' && method === 'GET';
-    const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+    const isMutation = !path.startsWith('/api/social/') && !['GET', 'HEAD', 'OPTIONS'].includes(method);
     if (isMutation) { generation++; pending = null; }
     const startedAt = generation;
     if (isLibrary && pending?.generation === startedAt && !options.signal) return pending.promise;

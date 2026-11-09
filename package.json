@@ -9,7 +9,7 @@
     "build:github-pages": "vite build --base=/obgmusicplayer/",
     "preview": "vite preview",
     "test": "node --test api/test/*.test.js src/*.test.js src/import/*.test.js",
-    "check:api": "node --check api/src/index.js && node --check api/src/import-workspace.js && node --check api/src/library-cache.js",
+    "check:api": "node --check api/src/index.js && node --check api/src/import-workspace.js && node --check api/src/library-cache.js && node --check api/src/social-api.js && node --check api/src/social-core.js && node --check api/src/social-realtime.js",
     "predeploy": "npm run build:github-pages",
     "deploy": "gh-pages -d dist"
   },

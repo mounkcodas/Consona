@@ -1,5 +1,7 @@
 import { importRoutes } from './import-workspace.js';
 import { cachedLibrary, cachedCoverPool } from './library-cache.js';
+import { socialRoutes, socialSocket, cleanupSocial } from './social-api.js';
+export { SocialUser, ListeningSession } from './social-realtime.js';
 
 const allowedOrigins = new Set([
   'https://mounkcodas.github.io',
@@ -115,7 +117,7 @@ function publicUser(user, request) {
 async function getUser(request, env) {
   const token = (request.headers.get('Authorization') || '').match(/^Bearer ([a-f0-9]{64})$/i)?.[1];
   if (!token) return null;
-  return env.DB.prepare(`SELECT users.id, users.username, users.display_name, users.avatar_key
+  return env.DB.prepare(`SELECT users.id, users.username, users.display_name, users.avatar_key, sessions.token_hash AS session_hash, sessions.expires_at AS session_expires_at
     FROM sessions JOIN users ON users.id = sessions.user_id
     WHERE sessions.token_hash = ? AND sessions.expires_at > datetime('now')`).bind(await digestHex(token)).first();
 }
@@ -160,7 +162,9 @@ async function authRoutes(request, env, path) {
   }
   if (path === '/api/auth/logout' && request.method === 'POST') {
     const token = (request.headers.get('Authorization') || '').match(/^Bearer ([a-f0-9]{64})$/i)?.[1];
+    const exiting = env.SOCIAL ? await getUser(request, env) : null;
     if (token) await env.DB.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await digestHex(token)).run();
+    if (exiting) await env.SOCIAL.getByName(exiting.id).revoke(exiting.session_hash);
     return json(request, { ok: true });
   }
   if (path === '/api/auth/me' && request.method === 'GET') {
@@ -180,9 +184,11 @@ async function updateProfile(request, env, user) {
     await env.MEDIA.put(key, avatar.stream(), { httpMetadata: { contentType: avatar.type, cacheControl: 'public, max-age=3600' } });
     if (user.avatar_key) await env.MEDIA.delete(user.avatar_key);
     await env.DB.prepare('UPDATE users SET display_name=?,avatar_key=? WHERE id=?').bind(displayName, key, user.id).run();
+    if (env.SOCIAL) await env.SOCIAL.getByName(user.id).profileUpdated(user.id);
     return json(request, { user: publicUser({ ...user, display_name: displayName, avatar_key: key }, request) });
   }
   await env.DB.prepare('UPDATE users SET display_name=? WHERE id=?').bind(displayName, user.id).run();
+  if (env.SOCIAL) await env.SOCIAL.getByName(user.id).profileUpdated(user.id);
   return json(request, { user: publicUser({ ...user, display_name: displayName }, request) });
 }
 
@@ -412,6 +418,7 @@ async function route(request, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname;
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: responseHeaders(request, { 'Access-Control-Max-Age': '86400' }) });
+  if (path === '/api/social/connect') return socialSocket(request, env);
   if (path === '/api/discover/album-covers' && request.method === 'GET') return cachedCoverPool(request, ctx, () => getAlbumCoverPool(request, env, ctx), responseHeaders);
   if (path === '/api/health' && request.method === 'GET') return json(request, { ok: true });
   const mediaMatch = path.match(/^\/api\/media\/(.+)$/);
@@ -419,6 +426,7 @@ async function route(request, env, ctx) {
   const authResponse = await authRoutes(request, env, path);
   if (authResponse) return authResponse;
   const user = await getUser(request, env);
+  if (path.startsWith('/api/social/')) return socialRoutes(request, env, user, { json, responseHeaders });
   if (path === '/api/import/tracks' && request.method === 'POST') return user ? uploadTrack(request, env, user, true) : fail(request, 'Entre na sua conta para importar músicas.', 401);
   const importResponse = await importRoutes(request, env, user, { json, fail, approvedImageUrl, mediaUrl, ctx });
   if (importResponse) return importResponse;
@@ -604,6 +612,7 @@ async function route(request, env, ctx) {
 }
 
 export default {
+  async scheduled(event, env, ctx) { ctx.waitUntil(cleanupSocial(env)); },
   async fetch(request, env, ctx) {
     const origin = request.headers.get('Origin');
     if (origin && !allowedOrigins.has(origin)) return new Response('Origin not allowed', { status: 403 });
