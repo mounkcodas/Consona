@@ -10,6 +10,7 @@ import AudioVisualizer from './AudioVisualizer.jsx';
 import AuthLanding from './AuthLanding.jsx';
 import SettingsPage from './SettingsPage.jsx';
 import QuickAlbums from './QuickAlbums.jsx';
+import { createApiClient } from './apiClient.js';
 import MusicTaskbar from './MusicTaskbar.jsx';
 import './organizer.css';
 
@@ -83,15 +84,7 @@ function readAudioDuration(file) {
 const database = () => new Promise((resolve, reject) => { const request = indexedDB.open('playmusic-files', 1); request.onupgradeneeded = () => request.result.createObjectStore('files'); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
 const saveFile = async (key, file) => { const db = await database(); return new Promise((resolve, reject) => { const request = db.transaction('files', 'readwrite').objectStore('files').put(file, key); request.onsuccess = () => resolve(); request.onerror = () => reject(request.error); }); };
 const getFile = async key => { const db = await database(); return new Promise((resolve, reject) => { const request = db.transaction('files').objectStore('files').get(key); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }); };
-async function apiRequest(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  const session = sessionStorage.getItem('consona-session');
-  if (session) headers.set('Authorization', `Bearer ${session}`);
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `Falha ao acessar a biblioteca (${response.status}).`);
-  return body;
-}
+const apiRequest = createApiClient(API_BASE);
 const musicBrainzProxy = (entity, params, options = {}) => apiRequest(`/api/musicbrainz?${new URLSearchParams({ entity, ...params })}`, options);
 async function lastfmRequest(method, values = {}, options = {}) {
   const params = new URLSearchParams({ method, ...values });
@@ -207,17 +200,23 @@ function App() {
     if (window.location.hash !== `#${route}`) window.history.replaceState({}, '', `/#${route}`);
   }, [authReady, currentUser]);
   async function handleUserChange(user) {
+    const profileUpdated = user && user.id === currentUser?.id;
     setCurrentUser(user);
     setData(value => ({ ...value, favorites: [], history: [] }));
     window.history.replaceState({}, '', `/#${user ? '/app' : '/login'}`);
     if (!user) { setData(blankState); setCurrentId(null); setAlbumQueueIds(null); setPlaying(false); return; }
-    try { setData(await apiRequest('/api/library')); }
-    catch (error) { setNotice(error.message); }
+    if (profileUpdated) {
+      try { setData(await apiRequest('/api/library')); }
+      catch (error) { setNotice(error.message); }
+    }
   }
   useEffect(() => {
     if (!currentUser) { setReady(true); return; }
     let cancelled = false;
+    let refreshing = false;
     const refreshLibrary = async (initial = false) => {
+      if (refreshing || (!initial && document.hidden)) return;
+      refreshing = true;
       try {
         const library = await apiRequest('/api/library');
         if (cancelled) return;
@@ -226,12 +225,15 @@ function App() {
       } catch (error) {
         if (!cancelled && initial) setNotice(`Biblioteca compartilhada indisponível: ${error.message}`);
       } finally {
+        refreshing = false;
         if (!cancelled && initial) setReady(true);
       }
     };
     refreshLibrary(true);
     const timer = window.setInterval(() => refreshLibrary(), 15000);
-    return () => { cancelled = true; window.clearInterval(timer); };
+    const onVisible = () => { if (!document.hidden) refreshLibrary(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { cancelled = true; window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
   }, [currentUser?.id]);
   useEffect(() => { if (!ready) return; try { localStorage.setItem(STORE, JSON.stringify({ ...data, favorites: [], history: [], tracks: tracks.map(({src, ...track}) => ({...track, src})) })); } catch { setNotice('Não foi possível salvar o cache da biblioteca.'); } }, [data, ready]);
   useEffect(() => { const audio = audioRef.current; if (!ready || !audio || !current) return; audio.volume = volume / 100; if (!current.src) { setPlaying(false); return; } if (audio.src !== current.src) { audio.src = current.src; audio.load(); } if (playing) audio.play().catch(() => setPlaying(false)); else audio.pause(); }, [ready, currentId, playing, volume, current?.src]);

@@ -48,8 +48,16 @@ export async function importRoutes(request, env, user, helpers) {
     const storedTracks = await readTracks(env, [...trackIds]);
     if (storedTracks.length !== tracks.length) return fail(request, 'Uma música foi removida da biblioteca. Atualize o rascunho.', 409);
     if (storedTracks.some(row => row.import_batch_id && (row.import_batch_id !== batchId || row.added_by !== user.id))) return fail(request, 'Uma música pertence a outro rascunho.', 403);
-    const existingAlbums = (await env.DB.prepare('SELECT * FROM albums').all()).results;
-    const memberships = (await env.DB.prepare('SELECT album_id,track_id,position FROM album_tracks ORDER BY position,rowid').all()).results;
+    const existingAlbums = [], memberships = [];
+    for (const ids of chunks([...existingIds], 80)) {
+      const placeholders = ids.map(() => '?').join(',');
+      const [albumRows, membershipRows] = await env.DB.batch([
+        env.DB.prepare(`SELECT * FROM albums WHERE id IN (${placeholders})`).bind(...ids),
+        env.DB.prepare(`SELECT album_id,track_id,position FROM album_tracks WHERE album_id IN (${placeholders}) ORDER BY position,rowid`).bind(...ids),
+      ]);
+      existingAlbums.push(...albumRows.results);
+      memberships.push(...membershipRows.results);
+    }
     const assets = (await env.DB.prepare('SELECT * FROM import_assets WHERE user_id=? AND batch_id=?').bind(user.id, batchId).all()).results;
     if (tracks.some(track => track.coverAssetId && !assets.some(asset => asset.id === track.coverAssetId))) return fail(request, 'Selecione novamente uma das capas individuais.', 409);
     const pendingTracks = (await env.DB.prepare('SELECT id,audio_key,cover_key,main_key FROM tracks WHERE import_batch_id=? AND added_by=?').bind(batchId, user.id).all()).results;

@@ -3,7 +3,7 @@
   "name": "playmusic-library-api",
   "main": "src/index.js",
   "compatibility_date": "2026-11-03",
-  "observability": { "enabled": true, "head_sampling_rate": 0.1 },
+  "observability": { "enabled": true, "head_sampling_rate": 0.1, "traces": { "enabled": true, "head_sampling_rate": 0.1 } },
   "r2_buckets": [
     { "binding": "MEDIA", "bucket_name": "playmusic-library" }
   ],

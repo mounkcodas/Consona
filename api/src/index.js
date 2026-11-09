@@ -1,4 +1,5 @@
 import { importRoutes } from './import-workspace.js';
+import { cachedLibrary, cachedCoverPool } from './library-cache.js';
 
 const allowedOrigins = new Set([
   'https://mounkcodas.github.io',
@@ -13,8 +14,8 @@ function responseHeaders(request, extra = {}) {
   const origin = request.headers.get('Origin');
   const headers = new Headers({
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type, Range, If-Range',
-    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Range, Content-Length, ETag',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, Range, If-Range, If-None-Match',
+    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Range, Content-Length, ETag, X-Library-Cache',
     'Vary': 'Origin',
     ...extra,
   });
@@ -34,17 +35,12 @@ function mediaUrl(request, key) {
   return key ? `${new URL(request.url).origin}/api/media/${encodeURIComponent(key)}` : '';
 }
 
-async function getLibrary(request, env, user) {
-  const [trackRows, playlistRows, itemRows, favoriteRows, historyRows, albumRows, albumItemRows, userRows] = await Promise.all([
-    env.DB.prepare('SELECT * FROM tracks WHERE import_batch_id IS NULL ORDER BY created_at DESC').all(),
-    env.DB.prepare('SELECT * FROM playlists ORDER BY created_at DESC').all(),
-    env.DB.prepare('SELECT playlist_id, track_id FROM playlist_tracks ORDER BY position, rowid').all(),
-    user ? env.DB.prepare('SELECT track_id FROM user_favorites WHERE user_id=?').bind(user.id).all() : Promise.resolve({ results: [] }),
-    user ? env.DB.prepare('SELECT track_id FROM user_history WHERE user_id=? ORDER BY played_at DESC, id DESC LIMIT 200').bind(user.id).all() : Promise.resolve({ results: [] }),
-    env.DB.prepare('SELECT * FROM albums ORDER BY created_at DESC').all(),
-    env.DB.prepare('SELECT album_id, track_id FROM album_tracks ORDER BY position, rowid').all(),
-    env.DB.prepare('SELECT id,display_name,avatar_key FROM users').all(),
-  ]);
+function serializeCatalog(request, rows) {
+  const [trackRows, playlistRows, itemRows, albumRows, albumItemRows, userRows] = rows;
+  const tracksById = new Map(trackRows.results.map(track => [track.id, track]));
+  const albumsById = new Map(albumRows.results.map(album => [album.id, album]));
+  const metadataById = new Map(trackRows.results.map(track => [track.id, parseMetadata(track.metadata_json)]));
+  const trackMetadata = track => metadataById.get(track?.id) || {};
   const usersById = new Map(userRows.results.map(person => [person.id, { id: person.id, displayName: person.display_name, avatar: mediaUrl(request, person.avatar_key) }]));
   const itemsByPlaylist = new Map();
   for (const item of itemRows.results) {
@@ -56,38 +52,36 @@ async function getLibrary(request, env, user) {
   for (const item of albumItemRows.results) { const entries = itemsByAlbum.get(item.album_id) || []; entries.push(item.track_id); itemsByAlbum.set(item.album_id, entries); }
   const albumCover = album => {
     if (!album) return '';
-    const firstTrack = trackRows.results.find(track => track.id === (itemsByAlbum.get(album.id) || [])[0]);
-    return mediaUrl(request, album.cover_key) || album.cover_url || parseMetadata(firstTrack?.metadata_json).coverUrl || mediaUrl(request, firstTrack?.cover_key) || '';
+    const firstTrack = tracksById.get((itemsByAlbum.get(album.id) || [])[0]);
+    return mediaUrl(request, album.cover_key) || album.cover_url || trackMetadata(firstTrack).coverUrl || mediaUrl(request, firstTrack?.cover_key) || '';
   };
-  const primaryAlbum = track => albumRows.results.find(album => album.id === track.primary_album_id);
-  const individualCover = track => parseMetadata(track.metadata_json).coverUrl || mediaUrl(request, track.cover_key) || '';
-  return json(request, {
+  const primaryAlbum = track => albumsById.get(track.primary_album_id);
+  const individualCover = track => trackMetadata(track).coverUrl || mediaUrl(request, track.cover_key) || '';
+  return {
     tracks: trackRows.results.map(track => ({
       id: track.id, title: track.title, artist: track.artist, album: primaryAlbum(track)?.title || track.album,
-      primaryAlbumId: track.primary_album_id, fileHash: track.content_hash || '', coverMode: parseMetadata(track.metadata_json).coverMode || 'individual', individualCover: individualCover(track),
+      primaryAlbumId: track.primary_album_id, fileHash: track.content_hash || '', coverMode: trackMetadata(track).coverMode || 'individual', individualCover: individualCover(track),
       duration: formatTime(track.duration_seconds), seconds: track.duration_seconds,
       src: mediaUrl(request, track.audio_key),
-      mainArt: mediaUrl(request, track.main_key) || parseMetadata(track.metadata_json).mainImageUrl || '',
-      cover: parseMetadata(track.metadata_json).coverMode === 'album' ? albumCover(primaryAlbum(track)) || individualCover(track) : individualCover(track) || albumCover(primaryAlbum(track)),
-      metadata: parseMetadata(track.metadata_json),
+      mainArt: mediaUrl(request, track.main_key) || trackMetadata(track).mainImageUrl || '',
+      cover: trackMetadata(track).coverMode === 'album' ? albumCover(primaryAlbum(track)) || individualCover(track) : individualCover(track) || albumCover(primaryAlbum(track)),
+      metadata: trackMetadata(track),
       addedBy: usersById.get(track.added_by) || null,
     })),
     playlists: playlistRows.results.map(list => ({
       id: list.id, name: list.name, trackIds: itemsByPlaylist.get(list.id) || [], addedBy: usersById.get(list.added_by) || null,
-      cover: mediaUrl(request, trackRows.results.find(track => track.id === (itemsByPlaylist.get(list.id) || [])[0])?.cover_key),
+      cover: mediaUrl(request, tracksById.get((itemsByPlaylist.get(list.id) || [])[0])?.cover_key),
     })),
     albums: albumRows.results.map(album => {
       const trackIds=itemsByAlbum.get(album.id)||[];
-      const firstTrack=trackRows.results.find(track=>track.id===trackIds[0]);
-      const firstTrackMetadata=parseMetadata(firstTrack?.metadata_json);
+      const firstTrack=tracksById.get(trackIds[0]);
+      const firstTrackMetadata=trackMetadata(firstTrack);
       return { id:album.id, title:album.title, artist:album.artist, trackIds, addedBy: usersById.get(album.added_by) || null,
         cover:mediaUrl(request,album.cover_key)||album.cover_url||firstTrackMetadata.coverUrl||mediaUrl(request,firstTrack?.cover_key)||'',
         coverProof:parseMetadata(album.metadata_json).googleCoverProof||firstTrackMetadata.googleCoverProof||'',
         metadata:parseMetadata(album.metadata_json) };
     }),
-    favorites: favoriteRows.results.map(row => row.track_id),
-    history: historyRows.results.map(row => row.track_id),
-  });
+  };
 }
 
 function parseMetadata(value) {
@@ -418,7 +412,10 @@ async function route(request, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname;
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: responseHeaders(request, { 'Access-Control-Max-Age': '86400' }) });
-  if (path === '/api/discover/album-covers' && request.method === 'GET') return getAlbumCoverPool(request, env, ctx);
+  if (path === '/api/discover/album-covers' && request.method === 'GET') return cachedCoverPool(request, ctx, () => getAlbumCoverPool(request, env, ctx), responseHeaders);
+  if (path === '/api/health' && request.method === 'GET') return json(request, { ok: true });
+  const mediaMatch = path.match(/^\/api\/media\/(.+)$/);
+  if (mediaMatch && request.method === 'GET') return mediaResponse(request, env, decodeURIComponent(mediaMatch[1]));
   const authResponse = await authRoutes(request, env, path);
   if (authResponse) return authResponse;
   const user = await getUser(request, env);
@@ -496,8 +493,7 @@ async function route(request, env, ctx) {
     }
     return json(request, { tracks, source: 'Spotify' });
   }
-  if (path === '/api/health' && request.method === 'GET') return json(request, { ok: true });
-  if (path === '/api/library' && request.method === 'GET') return user ? getLibrary(request, env, user) : fail(request, 'Entre na sua conta para acessar a biblioteca.', 401);
+  if (path === '/api/library' && request.method === 'GET') return user ? cachedLibrary(request, env, ctx, user, serializeCatalog, responseHeaders) : fail(request, 'Entre na sua conta para acessar a biblioteca.', 401);
   if (path === '/api/covers/google' && request.method === 'GET') return googleImageSearch(request, env);
   if (path === '/api/tracks' && request.method === 'POST') return user ? uploadTrack(request, env, user) : fail(request, 'Entre na sua conta para adicionar músicas.', 401);
   const trackLyricsMatch = path.match(/^\/api\/tracks\/([^/]+)\/lyrics$/);
@@ -527,13 +523,11 @@ async function route(request, env, ctx) {
     await env.DB.prepare('UPDATE tracks SET metadata_json = ? WHERE id = ?').bind(JSON.stringify(metadata), trackCoverMatch[1]).run();
     return json(request, { ok: true, coverUrl });
   }
-  const mediaMatch = path.match(/^\/api\/media\/(.+)$/);
-  if (mediaMatch && request.method === 'GET') return mediaResponse(request, env, decodeURIComponent(mediaMatch[1]));
   if (path === '/api/playlists' && request.method === 'POST') return user ? createPlaylist(request, env, user) : fail(request, 'Entre na sua conta para criar playlists.', 401);
   if (path === '/api/albums' && request.method === 'POST') return user ? createAlbum(request, env, user) : fail(request, 'Entre na sua conta para criar álbuns.', 401);
   const albumMatch=path.match(/^\/api\/albums\/([^/]+)$/);
   if(albumMatch&&request.method==='PUT') return user ? updateAlbum(request,env,albumMatch[1]) : fail(request, 'Entre na sua conta para editar álbuns.', 401);
-  if(albumMatch&&request.method==='DELETE') { if(!user)return fail(request,'Entre na sua conta para excluir álbuns.',401); await env.DB.prepare('DELETE FROM album_tracks WHERE album_id=?').bind(albumMatch[1]).run(); await env.DB.prepare('DELETE FROM albums WHERE id=?').bind(albumMatch[1]).run(); return json(request,{ok:true}); }
+  if(albumMatch&&request.method==='DELETE') { if(!user)return fail(request,'Entre na sua conta para excluir álbuns.',401); await env.DB.prepare('DELETE FROM albums WHERE id=?').bind(albumMatch[1]).run(); return json(request,{ok:true}); }
   const albumTracksMatch=path.match(/^\/api\/albums\/([^/]+)\/tracks$/);
   if (albumTracksMatch && request.method === 'POST') {
     if (!user) return fail(request, 'Entre na sua conta para alterar álbuns.', 401);
@@ -553,7 +547,6 @@ async function route(request, env, ctx) {
   const playlistMatch = path.match(/^\/api\/playlists\/([^/]+)$/);
   if (playlistMatch && request.method === 'DELETE') {
     if (!user) return fail(request, 'Entre na sua conta para excluir playlists.', 401);
-    await env.DB.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ?').bind(playlistMatch[1]).run();
     await env.DB.prepare('DELETE FROM playlists WHERE id = ?').bind(playlistMatch[1]).run();
     return json(request, { ok: true });
   }
@@ -578,7 +571,7 @@ async function route(request, env, ctx) {
   if (historyMatch && request.method === 'POST') {
     if (!user) return fail(request, 'Entre na sua conta para salvar o histórico.', 401);
     await env.DB.prepare('INSERT INTO user_history (user_id,track_id) SELECT ?,id FROM tracks WHERE id=?').bind(user.id,historyMatch[1]).run();
-    await env.DB.prepare('DELETE FROM user_history WHERE user_id=? AND id NOT IN (SELECT id FROM user_history WHERE user_id=? ORDER BY played_at DESC,id DESC LIMIT 200)').bind(user.id,user.id).run();
+    await env.DB.prepare('DELETE FROM user_history WHERE user_id=? AND (played_at,id) < (SELECT played_at,id FROM user_history WHERE user_id=? ORDER BY played_at DESC,id DESC LIMIT 1 OFFSET 199)').bind(user.id,user.id).run();
     return json(request, { ok: true }, 201);
   }
   const trackMatch = path.match(/^\/api\/tracks\/([^/]+)$/);
@@ -604,11 +597,6 @@ async function route(request, env, ctx) {
     if (!user) return fail(request, 'Entre na sua conta para excluir músicas.', 401);
     const track = await env.DB.prepare('SELECT audio_key, cover_key, main_key FROM tracks WHERE id = ?').bind(trackMatch[1]).first();
     if (track) await Promise.all([track.audio_key, track.cover_key, track.main_key].filter(Boolean).map(key => env.MEDIA.delete(key)));
-    await env.DB.prepare('DELETE FROM playlist_tracks WHERE track_id = ?').bind(trackMatch[1]).run();
-    await env.DB.prepare('DELETE FROM favorites WHERE track_id = ?').bind(trackMatch[1]).run();
-    await env.DB.prepare('DELETE FROM history WHERE track_id = ?').bind(trackMatch[1]).run();
-    await env.DB.prepare('DELETE FROM user_history WHERE track_id = ?').bind(trackMatch[1]).run();
-    await env.DB.prepare('DELETE FROM user_favorites WHERE track_id = ?').bind(trackMatch[1]).run();
     await env.DB.prepare('DELETE FROM tracks WHERE id = ?').bind(trackMatch[1]).run();
     return json(request, { ok: true });
   }
