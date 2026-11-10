@@ -159,14 +159,17 @@ test('library caching preserves behavior while bounding D1 reads', async t => {
     assert.equal((await request('/api/library', { etag: published.headers.get('ETag') })).status, 304);
   });
   await t.test('playlist drafts publish staged songs without changing existing album membership', async () => {
-    const existingPlaylistId = randomUUID(), stagedId = randomUUID(), batchId = randomUUID(), playlistKey = randomUUID();
+    const existingPlaylistId = randomUUID(), stagedId = randomUUID(), batchId = randomUUID(), playlistKey = randomUUID(), coverId = randomUUID();
     await db.prepare("INSERT INTO playlists(id,name,added_by) VALUES(?,'Original',?)").bind(existingPlaylistId, userA).run();
     await db.prepare('INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES(?,?,0)').bind(existingPlaylistId, trackIds[5]).run();
     await db.prepare("INSERT INTO tracks(id,title,artist,album,audio_key,added_by,import_batch_id,import_item_key) VALUES(?,'New song','Artist','',?,?,?,?)")
       .bind(stagedId, `tracks/${stagedId}/audio.mp3`, userA, batchId, randomUUID()).run();
+    const coverKey = `albums/${coverId}/cover.png`;
+    await bucket.put(coverKey, 'cover');
+    await db.prepare('INSERT INTO import_assets(id,batch_id,user_id,item_key,media_key) VALUES(?,?,?,?,?)').bind(coverId, batchId, userA, 'playlist-cover', coverKey).run();
     const before = await request();
-    const payload = { batchId, albums: [], playlists: [{ key: playlistKey, existingId: existingPlaylistId, name: 'Renamed', initialName: 'Original', initialTrackIds: [trackIds[5]], trackIds: [stagedId, trackIds[5]] }],
-      tracks: [{ id: stagedId, title: 'New song', artist: 'Artist', albumKey: '', coverMode: 'individual' }, { id: trackIds[5], title: 'Track 5', artist: 'Artist', albumKey: '', coverMode: 'album' }] };
+    const payload = { batchId, albums: [], playlists: [{ key: playlistKey, existingId: existingPlaylistId, name: 'Renamed', initialName: 'Original', initialCustomCover: '', initialTrackIds: [trackIds[5]], coverAssetId: coverId, trackIds: [stagedId, trackIds[5]] }],
+      tracks: [{ id: stagedId, title: 'New song', artist: 'Artist', albumKey: '', coverMode: 'individual' }, { id: trackIds[5], title: 'Edited in playlist', artist: 'Artist', albumKey: '', coverMode: 'album' }] };
     const commit = await request('/api/import/commit', { method: 'POST', body: payload });
     assert.equal(commit.status, 200, JSON.stringify(commit.body));
     assert.deepEqual((await request('/api/import/commit', { method: 'POST', body: payload })).body, commit.body);
@@ -174,7 +177,11 @@ test('library caching preserves behavior while bounding D1 reads', async t => {
     assert.equal(after.status, 200);
     assert.deepEqual(after.body.playlists.find(list => list.id === existingPlaylistId).trackIds, [stagedId, trackIds[5]]);
     assert.equal(after.body.playlists.find(list => list.id === existingPlaylistId).name, 'Renamed');
+    assert.equal(after.body.playlists.find(list => list.id === existingPlaylistId).coverIsCustom, true);
+    assert.ok(after.body.playlists.find(list => list.id === existingPlaylistId).cover.includes(coverId));
+    assert.ok(await bucket.get(coverKey));
     assert.ok(after.body.albums.find(album => album.id === albumId).trackIds.includes(trackIds[5]));
+    assert.equal(after.body.tracks.find(track => track.id === trackIds[5]).title, 'Edited in playlist');
     assert.equal(after.body.tracks.find(track => track.id === stagedId).album, '');
     const stale = await request('/api/import/commit', { method: 'POST', body: { batchId: randomUUID(), albums: [], playlists: [{ ...payload.playlists[0], name: 'Stale' }], tracks: payload.tracks } });
     assert.equal(stale.status, 409);

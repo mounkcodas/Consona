@@ -71,8 +71,8 @@ function serializeCatalog(request, rows) {
       addedBy: usersById.get(track.added_by) || null,
     })),
     playlists: playlistRows.results.map(list => ({
-      id: list.id, name: list.name, trackIds: itemsByPlaylist.get(list.id) || [], addedBy: usersById.get(list.added_by) || null,
-      cover: (() => { const first = tracksById.get((itemsByPlaylist.get(list.id) || [])[0]); return trackMetadata(first).coverMode === 'album' ? albumCover(primaryAlbum(first)) || individualCover(first) : individualCover(first) || albumCover(primaryAlbum(first)); })(),
+      id: list.id, name: list.name, trackIds: itemsByPlaylist.get(list.id) || [], addedBy: usersById.get(list.added_by) || null, coverIsCustom: Boolean(list.cover_key),
+      cover: mediaUrl(request, list.cover_key) || (() => { const first = tracksById.get((itemsByPlaylist.get(list.id) || [])[0]); return trackMetadata(first).coverMode === 'album' ? albumCover(primaryAlbum(first)) || individualCover(first) : individualCover(first) || albumCover(primaryAlbum(first)); })(),
     })),
     albums: albumRows.results.map(album => {
       const trackIds=itemsByAlbum.get(album.id)||[];

@@ -100,7 +100,7 @@ export default function ImportWorkspace({ userId, library, apiRequest, readTags,
   }
   function addExistingPlaylist(playlist) {
     if (draft.playlists.some(item => item.existingId === playlist.id)) return;
-    const card = { key: crypto.randomUUID(), existingId: playlist.id, name: playlist.name, initialName: playlist.name, initialTrackIds: [...playlist.trackIds], trackKeys: [] };
+    const card = { key: crypto.randomUUID(), existingId: playlist.id, name: playlist.name, coverUrl: playlist.coverIsCustom ? playlist.cover : '', initialCustomCover: playlist.coverIsCustom ? playlist.cover : '', initialName: playlist.name, initialTrackIds: [...playlist.trackIds], trackKeys: [] };
     const known = new Map(draft.tracks.filter(row => row.existingId).map(row => [row.existingId, row.key]));
     const missing = playlist.trackIds.filter(id => !known.has(id)).map(id => library.tracks.find(track => track.id === id)).filter(Boolean).map(track => catalogRow(track));
     for (const row of missing) known.set(row.existingId, row.key);
@@ -141,6 +141,12 @@ export default function ImportWorkspace({ userId, library, apiRequest, readTags,
     if (file.size > 5 * 1024 * 1024 || !/^image\/(jpeg|png|webp|avif)$/.test(file.type)) { setMessage('Escolha uma capa JPG, PNG, WebP ou AVIF de até 5 MB.'); return; }
     try { const key = `${userId}:${draft.batchId}:${crypto.randomUUID()}:individual-cover`; await putAsset(key, file); patchRow(row.key, { coverFileKey: key, coverDirty: true, uploadedIndividualCoverId: '', coverMode: 'individual' }); }
     catch { setMessage('Não foi possível guardar a capa individual no rascunho.'); }
+  }
+  async function setPlaylistCover(playlist, file) {
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024 || !/^image\/(jpeg|png|webp|avif)$/.test(file.type)) { setMessage('Escolha uma capa JPG, PNG, WebP ou AVIF de até 5 MB.'); return; }
+    try { const key = `${userId}:${draft.batchId}:${crypto.randomUUID()}:playlist-cover`; await putAsset(key, file); patchPlaylist(playlist.key, { coverFileKey: key, uploadedCoverId: '' }); }
+    catch { setMessage('Não foi possível guardar a capa no rascunho.'); }
   }
   async function identify(keys) {
     cancelSearch.current = false; setMessage('');
@@ -207,6 +213,15 @@ export default function ImportWorkspace({ userId, library, apiRequest, readTags,
           await persistDraft(userId, working); dispatch({ type: 'restore', value: working });
         }
       }
+      for (const playlist of working.playlists) {
+        if (playlist.coverFileKey && !playlist.uploadedCoverId) {
+          const cover = await getAsset(playlist.coverFileKey); if (!cover) throw new Error(`Selecione novamente a capa de “${playlist.name}”.`);
+          const data = new FormData(); data.set('batchId', working.batchId); data.set('itemKey', playlist.coverFileKey); data.set('cover', cover, 'playlist-cover');
+          const result = await apiRequest('/api/import/covers', { method: 'POST', body: data });
+          working = { ...working, playlists: working.playlists.map(item => item.key === playlist.key ? { ...item, uploadedCoverId: result.id } : item) };
+          await persistDraft(userId, working); dispatch({ type: 'restore', value: working });
+        }
+      }
       for (let index = 0; index < working.tracks.length; index++) {
         let row = working.tracks[index];
         if (row.coverDirty && row.coverFileKey && !row.uploadedIndividualCoverId) {
@@ -230,7 +245,7 @@ export default function ImportWorkspace({ userId, library, apiRequest, readTags,
       }
       setJob('Salvando organização…');
       const idsByKey = new Map(working.tracks.map(row => [row.key, row.existingId || row.uploadedId]));
-      const payload = { batchId: working.batchId, albums: working.albums.map(({ key, existingId, title, artist, coverUrl, uploadedCoverId, releaseGroupId, spotifyId, releaseYear, releaseYearSource, sourceUrl, initialTitle, initialArtist, initialCover }) => ({ key, existingId, title, artist, coverUrl: uploadedCoverId ? '' : coverUrl, coverAssetId: uploadedCoverId, releaseGroupId, spotifyId, releaseYear, releaseYearSource, sourceUrl, initialTitle, initialArtist, initialCover })), playlists: working.playlists.map(({ key, existingId, name, initialName, initialTrackIds, trackKeys }) => ({ key, existingId, name, initialName, initialTrackIds, trackIds: trackKeys.map(trackKey => idsByKey.get(trackKey)).filter(Boolean) })), tracks: working.tracks.map(row => ({ id: row.existingId || row.uploadedId, albumKey: row.albumKey, title: row.title, artist: row.artist, coverMode: row.coverMode || 'individual', identification: row.metadata?.identification || null, coverAssetId: row.uploadedIndividualCoverId || '' })) };
+      const payload = { batchId: working.batchId, albums: working.albums.map(({ key, existingId, title, artist, coverUrl, uploadedCoverId, releaseGroupId, spotifyId, releaseYear, releaseYearSource, sourceUrl, initialTitle, initialArtist, initialCover }) => ({ key, existingId, title, artist, coverUrl: uploadedCoverId ? '' : coverUrl, coverAssetId: uploadedCoverId, releaseGroupId, spotifyId, releaseYear, releaseYearSource, sourceUrl, initialTitle, initialArtist, initialCover })), playlists: working.playlists.map(({ key, existingId, name, initialName, initialTrackIds, initialCustomCover, trackKeys, uploadedCoverId }) => ({ key, existingId, name, initialName, initialTrackIds, initialCustomCover, coverAssetId: uploadedCoverId, trackIds: trackKeys.map(trackKey => idsByKey.get(trackKey)).filter(Boolean) })), tracks: working.tracks.map(row => ({ id: row.existingId || row.uploadedId, albumKey: row.albumKey, title: row.title, artist: row.artist, coverMode: row.coverMode || 'individual', identification: row.metadata?.identification || null, coverAssetId: row.uploadedIndividualCoverId || '' })) };
       await apiRequest('/api/import/commit', { method: 'POST', ...jsonOptions(payload) });
       const next = newDraft(); await persistDraft(userId, next); dispatch({ type: 'restore', value: next });
       await clearDraftAssets(userId, working.batchId);
@@ -284,8 +299,9 @@ export default function ImportWorkspace({ userId, library, apiRequest, readTags,
         const first = draft.tracks.find(row => row.key === playlist.trackKeys[0]);
         const cover = library.tracks.find(track => track.id === first?.existingId)?.cover || first?.coverUrl || '';
         return <section key={playlist.key} className={`organizer-column organizer-album organizer-playlist ${dropTarget === playlist.key ? 'is-drop-target' : ''}`} onDragOver={event => { event.preventDefault(); setDropTarget(playlist.key); }} onDrop={event => dropOnPlaylist(event, playlist.key)}>
-          <header><Cover fileKey={first?.coverFileKey} url={cover}/><div><span className="organizer-album-kind">{playlist.existingId ? 'DA BIBLIOTECA' : 'NOVA PLAYLIST'}</span><input aria-label={`Nome da playlist ${playlist.key}`} disabled={!!job} placeholder="Nome da playlist" value={playlist.name} onChange={event => patchPlaylist(playlist.key, { name: event.target.value }, 'name')}/></div><button disabled={!!job} aria-label={`Retirar playlist ${playlist.name || 'sem nome'} do rascunho`} onClick={() => change(value => ({ ...value, playlists: value.playlists.filter(item => item.key !== playlist.key) }))}><X size={15}/></button></header>
+          <header><Cover fileKey={playlist.coverFileKey || (playlist.coverUrl ? "" : first?.coverFileKey)} url={playlist.coverUrl || cover}/><div><span className="organizer-album-kind">{playlist.existingId ? 'DA BIBLIOTECA' : 'NOVA PLAYLIST'}</span><input aria-label={`Nome da playlist ${playlist.key}`} disabled={!!job} placeholder="Nome da playlist" value={playlist.name} onChange={event => patchPlaylist(playlist.key, { name: event.target.value }, 'name')}/></div><button disabled={!!job} aria-label={`Retirar playlist ${playlist.name || 'sem nome'} do rascunho`} onClick={() => change(value => ({ ...value, playlists: value.playlists.filter(item => item.key !== playlist.key) }))}><X size={15}/></button></header>
           <div className="organizer-album-tools"><label><Upload size={13}/>Adicionar MP3s<input type="file" multiple accept="audio/*,.mp3,.flac,.m4a,.ogg,.wav" disabled={!!job} onChange={event => { addFiles(event.target.files, '', playlist.key); event.target.value = ''; }}/></label><button disabled={!!job} onClick={() => { setShowCatalog(true); setCatalogAlbums(false); setCatalogPlaylists(false); }}><Library size={13}/>Músicas existentes</button></div>
+          <div className="organizer-album-tools"><label><Upload size={13}/>Escolher capa<input type="file" accept="image/png,image/jpeg,image/webp,image/avif" disabled={!!job} onChange={event => { setPlaylistCover(playlist, event.target.files?.[0]); event.target.value = ""; }}/></label></div>
           <div className="organizer-album-order"><button disabled={!!job || playlist.trackKeys.length < 2} onClick={() => change(value => sortPlaylist(value, playlist.key))}><ListOrdered size={14}/>Ordenar músicas por nome</button></div>
           <div className="organizer-column-tracks">{playlist.trackKeys.map(key => draft.tracks.find(row => row.key === key)).filter(Boolean).map(row => renderTrack(row, null, playlist))}{!playlist.trackKeys.length && <div className="organizer-album-drop"><ListMusic size={28}/><p>Arraste músicas ou arquivos para esta playlist.</p><small>Você também pode usar a seleção ou músicas existentes.</small></div>}</div>
         </section>;

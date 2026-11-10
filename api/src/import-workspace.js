@@ -70,7 +70,7 @@ export async function importRoutes(request, env, user, helpers) {
     for (const ids of chunks([...existingPlaylistIds], 80)) {
       const placeholders = ids.map(() => '?').join(',');
       const [playlistRows, membershipRows] = await env.DB.batch([
-        env.DB.prepare(`SELECT id,name FROM playlists WHERE id IN (${placeholders})`).bind(...ids),
+        env.DB.prepare(`SELECT id,name,cover_key FROM playlists WHERE id IN (${placeholders})`).bind(...ids),
         env.DB.prepare(`SELECT playlist_id,track_id FROM playlist_tracks WHERE playlist_id IN (${placeholders}) ORDER BY position,rowid`).bind(...ids),
       ]);
       existingPlaylists.push(...playlistRows.results);
@@ -106,8 +106,15 @@ export async function importRoutes(request, env, user, helpers) {
       const values = group.flatMap(row => [row.id, row.title, row.artist, albumIds.get(row.albumKey), albums.find(album => album.key === row.albumKey).title, JSON.stringify({ ...metadata(storedTracks.find(track => track.id === row.id)?.metadata_json), ...(row.identification ? { identification: row.identification } : {}), coverMode: row.coverMode })]);
       statements.push(env.DB.prepare(`WITH incoming(id,title,artist,album_id,album_title,meta_json) AS (VALUES ${group.map(() => '(?,?,?,?,?,?)').join(',')}) UPDATE tracks SET title=(SELECT title FROM incoming WHERE incoming.id=tracks.id),artist=(SELECT artist FROM incoming WHERE incoming.id=tracks.id),album=(SELECT album_title FROM incoming WHERE incoming.id=tracks.id),primary_album_id=(SELECT album_id FROM incoming WHERE incoming.id=tracks.id),metadata_json=(SELECT meta_json FROM incoming WHERE incoming.id=tracks.id),import_batch_id=NULL,import_item_key=NULL WHERE id IN (SELECT id FROM incoming)`).bind(...values));
     }
-    for (const group of chunks(tracks.filter(track => !track.albumKey && storedTracks.find(row => row.id === track.id)?.import_batch_id), 80)) {
-      statements.push(env.DB.prepare(`UPDATE tracks SET import_batch_id=NULL,import_item_key=NULL WHERE id IN (${group.map(() => '?').join(',')})`).bind(...group.map(track => track.id)));
+    const playlistOnlyEdits = tracks.filter(track => !track.albumKey).map(track => {
+      const stored = storedTracks.find(row => row.id === track.id);
+      const oldMeta = metadata(stored.metadata_json);
+      const nextMeta = { ...oldMeta, ...(track.identification ? { identification: track.identification } : {}), ...(track.coverAssetId ? { coverMode: 'individual' } : {}) };
+      return { ...track, meta: JSON.stringify(nextMeta), changed: !!stored.import_batch_id || stored.title !== track.title || stored.artist !== track.artist || JSON.stringify(oldMeta) !== JSON.stringify(nextMeta) };
+    }).filter(track => track.changed);
+    for (const group of chunks(playlistOnlyEdits, 20)) {
+      const values = group.flatMap(track => [track.id, track.title, track.artist, track.meta]);
+      statements.push(env.DB.prepare(`WITH incoming(id,title,artist,meta_json) AS (VALUES ${group.map(() => '(?,?,?,?)').join(',')}) UPDATE tracks SET title=(SELECT title FROM incoming WHERE incoming.id=tracks.id),artist=(SELECT artist FROM incoming WHERE incoming.id=tracks.id),metadata_json=(SELECT meta_json FROM incoming WHERE incoming.id=tracks.id),import_batch_id=NULL,import_item_key=NULL WHERE id IN (SELECT id FROM incoming)`).bind(...values));
     }
     for (const ids of chunks(albumTracks.map(track => track.id), 80)) statements.push(env.DB.prepare(`DELETE FROM album_tracks WHERE track_id IN (${ids.map(() => '?').join(',')})`).bind(...ids));
     for (const track of tracks.filter(track => track.coverAssetId)) {
@@ -128,9 +135,13 @@ export async function importRoutes(request, env, user, helpers) {
       if (playlist.existingId && !stored) return fail(request, `A playlist “${playlist.name}” foi removida. Adicione-a novamente.`, 409);
       const originalIds = playlistMemberships.filter(item => item.playlist_id === stored?.id).map(item => item.track_id);
       if (stored && (stored.name !== playlist.initialName || JSON.stringify(originalIds) !== JSON.stringify(playlist.initialTrackIds || []))) return fail(request, `A playlist “${stored.name}” mudou desde a abertura do rascunho. Adicione-a novamente.`, 409);
+      if (stored && playlist.initialCustomCover !== undefined && playlist.initialCustomCover !== (mediaUrl(request, stored.cover_key) || '')) return fail(request, `A capa de “${stored.name}” mudou desde a abertura do rascunho. Adicione a playlist novamente.`, 409);
       const id = stored?.id || crypto.randomUUID(); playlistIds.set(playlist.key, id);
-      if (stored) statements.push(env.DB.prepare('UPDATE playlists SET name=? WHERE id=?').bind(playlist.name, id));
-      else statements.push(env.DB.prepare('INSERT INTO playlists (id,name,added_by) VALUES (?,?,?)').bind(id, playlist.name, user.id));
+      const cover = playlist.coverAssetId ? assets.find(asset => asset.id === playlist.coverAssetId) : null;
+      if (playlist.coverAssetId && !cover) return fail(request, `Selecione novamente a capa de “${playlist.name}”.`, 409);
+      const coverKey = cover?.media_key || stored?.cover_key || null;
+      if (stored) statements.push(env.DB.prepare('UPDATE playlists SET name=?,cover_key=? WHERE id=?').bind(playlist.name, coverKey, id));
+      else statements.push(env.DB.prepare('INSERT INTO playlists (id,name,added_by,cover_key) VALUES (?,?,?,?)').bind(id, playlist.name, user.id, coverKey));
       if (stored) statements.push(env.DB.prepare('DELETE FROM playlist_tracks WHERE playlist_id=?').bind(id));
       for (const group of chunks(playlist.trackIds.map((trackId, position) => [id, trackId, position]), 30)) {
         statements.push(env.DB.prepare(`INSERT INTO playlist_tracks (playlist_id,track_id,position) VALUES ${group.map(() => '(?,?,?)').join(',')}`).bind(...group.flat()));
@@ -141,7 +152,7 @@ export async function importRoutes(request, env, user, helpers) {
     statements.push(env.DB.prepare('DELETE FROM import_assets WHERE user_id=? AND batch_id=?').bind(user.id, batchId));
     statements.push(env.DB.prepare('INSERT INTO import_batches (id,user_id,result_json) VALUES (?,?,?)').bind(batchId, user.id, JSON.stringify(result)));
     await env.DB.batch(statements);
-    const usedCovers = new Set([...albums.map(album => album.coverAssetId), ...tracks.map(track => track.coverAssetId)].filter(Boolean));
+    const usedCovers = new Set([...albums.map(album => album.coverAssetId), ...playlists.map(playlist => playlist.coverAssetId), ...tracks.map(track => track.coverAssetId)].filter(Boolean));
     const unusedMedia = [...pendingTracks.filter(row => !trackIds.has(row.id)).flatMap(row => [row.audio_key, row.cover_key, row.main_key]), ...assets.filter(asset => !usedCovers.has(asset.id)).map(asset => asset.media_key)].filter(Boolean);
     if (unusedMedia.length) ctx.waitUntil((async () => { for (const group of chunks(unusedMedia, 100)) await env.MEDIA.delete(group); })().catch(error => console.error(JSON.stringify({ event: 'import_cleanup_failed', message: String(error) }))));
     return json(request, result);
