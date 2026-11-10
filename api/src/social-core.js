@@ -7,7 +7,7 @@ export function person(row, origin) {
   return { id: row.id, username: row.username, displayName: row.display_name, avatar: row.avatar_key ? `${origin}/api/media/${encodeURIComponent(row.avatar_key)}` : '', joinedAt: row.created_at };
 }
 export function message(row) {
-  return { id: row.id, seq: row.seq, conversationId: row.conversation_id, senderId: row.sender_id, clientId: row.client_id, text: row.body, kind: row.kind, payload: parse(row.payload_json), createdAt: row.created_at, editedAt: row.edited_at, deletedAt: row.deleted_at };
+  return { id: row.id, seq: row.seq, conversationId: row.conversation_id, senderId: row.sender_id, clientId: row.client_id, text: row.body, kind: row.kind, payload: parse(row.payload_json), createdAt: row.created_at, editedAt: row.edited_at, deletedAt: row.deleted_at, replyTo: row.reply_to || null };
 }
 export async function settings(env, id) {
   return { ...defaults, ...await env.DB.prepare('SELECT * FROM user_social_settings WHERE user_id=?').bind(id).first() };

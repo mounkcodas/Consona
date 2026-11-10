@@ -223,6 +223,24 @@ export class ListeningSession extends DurableObject {
     if (!state || ![state.hostId, state.guestId].includes(userId)) throw problem('Sessão não encontrada.', 404);
     await requireFriend(this.env, state.hostId, state.guestId); return state;
   }
+  async enqueue(userId, trackId) {
+    let state = await this.snapshot(userId);
+    if (state.status !== 'active') throw problem('Sessão indisponível.',403);
+    if (!await this.env.DB.prepare('SELECT id FROM tracks WHERE id=? AND import_batch_id IS NULL').bind(trackId).first()) throw problem('Música indisponível.',404);
+    state = this.state();
+    if (state.status !== 'active' || ![state.hostId,state.guestId].includes(userId)) throw problem('Sessão encerrada.',403);
+    state.queue = Array.isArray(state.queue) ? state.queue : [];
+    if (state.queue.length >= 100) throw problem('Fila cheia.',409);
+    state.queue.push({id:crypto.randomUUID(),trackId,addedBy:userId}); state.revision++; this.save(state); await this.publish(state); return state;
+  }
+  async next(userId) {
+    let state = await this.snapshot(userId);
+    state = this.state();
+    if (state.status !== 'active' || (userId !== state.hostId && !state.guestCanControl)) throw problem('Controle indisponível.',403);
+    if (!state.queue?.length) throw problem('A fila está vazia.',409);
+    const item=state.queue.shift(); state.trackId=item.trackId; state.position=0; state.playing=true; state.updatedAt=Date.now(); state.revision++;
+    this.save(state); await this.publish(state); return state;
+  }
   async control(userId, event) {
     let state = this.state();
     if (!state || state.status !== 'active' || ![state.hostId, state.guestId].includes(userId)) throw problem('Sessão indisponível.', 403);

@@ -10,15 +10,15 @@ function statements(sql) {
   for (const line of sql.replace(/^--.*$/gm, '').split('\n')) { buffer += line + '\n'; if (/CREATE TRIGGER/i.test(buffer) ? /END;\s*$/.test(buffer) : /;\s*$/.test(buffer)) { result.push(buffer.trim()); buffer = ''; } }
   return result;
 }
-const base = 'https://social.test', a = randomUUID(), b = randomUUID(), c = randomUUID(), track = randomUUID();
-const tokens = new Map([[a,'a'.repeat(64)],[b,'b'.repeat(64)],[c,'c'.repeat(64)]]);
+const base = 'https://social.test', a = randomUUID(), b = randomUUID(), c = randomUUID(), d = randomUUID(), track = randomUUID();
+const tokens = new Map([[a,'a'.repeat(64)],[b,'b'.repeat(64)],[c,'c'.repeat(64)],[d,'d'.repeat(64)]]);
 test('friends, private chat and musical sessions run in the real D1/R2/DO runtime', async t => {
   const mf = new Miniflare(convertV4MiniflareOptions({ modules: ['api/test/social-harness.js','api/src/index.js','api/src/import-workspace.js','api/src/library-cache.js','api/src/social-api.js','api/src/social-core.js','api/src/social-realtime.js'].map(path => ({ type:'ESModule',path:resolve(path) })),
     compatibilityDate:'2026-11-03', d1Databases:['DB'], r2Buckets:['MEDIA'], durableObjects:{ SOCIAL:{className:'MeasuredSocialUser',useSQLite:true}, LISTENING:{className:'ListeningSession',useSQLite:true} } }));
   t.after(() => mf.dispose());
   const db = await mf.getD1Database('DB');
   for (const file of (await readdir('api/migrations')).sort()) for (const sql of statements(await readFile(`api/migrations/${file}`,'utf8'))) await db.prepare(sql).run();
-  for (const [id,name] of [[a,'alice'],[b,'bob'],[c,'outsider']]) {
+  for (const [id,name] of [[a,'alice'],[b,'bob'],[c,'outsider'],[d,'stranger']]) {
     await db.prepare("INSERT INTO users(id,username,display_name,password_salt,password_hash) VALUES(?,?,?,'','')").bind(id,name,name).run();
     await db.prepare("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,datetime('now','+1 day'))").bind(createHash('sha256').update(tokens.get(id)).digest('hex'),id).run();
   }
@@ -74,6 +74,41 @@ test('friends, private chat and musical sessions run in the real D1/R2/DO runtim
     ok(await social(`/messages/${sent.id}`,a,'PUT',{text:'Música editada'}));
     assert.equal(ok(await social(`/conversations/${conversation}/messages?q=editada`,b)).messages[0].id,sent.id);
   });
+  await t.test('replies, reactions and marks remain scoped to conversation members',async()=>{
+    const reply=ok(await social(`/conversations/${conversation}/messages`,b,'POST',{text:'Resposta',replyTo:sent.id,clientId:randomUUID()})).message;
+    assert.equal(reply.replyTo,sent.id);
+    assert.equal((await social(`/conversations/${conversation}/messages`,b,'POST',{text:'Resposta',replyTo:randomUUID(),clientId:randomUUID()})).status,404);
+    assert.equal((await social(`/messages/${sent.id}/reaction`,c,'PUT',{emoji:'\u2764\ufe0f'})).status,404);
+    ok(await social(`/messages/${sent.id}/reaction`,b,'PUT',{emoji:'\u2764\ufe0f'}));
+    ok(await social(`/messages/${sent.id}/pin`,a,'PUT',{}));
+    ok(await social(`/messages/${sent.id}/favorite`,a,'PUT',{}));
+    const aFeatures=ok(await social(`/conversations/${conversation}/features`,a));
+    const bFeatures=ok(await social(`/conversations/${conversation}/features`,b));
+    assert.equal(aFeatures.reactions[0].emoji,'\u2764\ufe0f');
+    assert.ok(bFeatures.marks.some(x=>x.kind==='pin'));
+    assert.ok(!bFeatures.marks.some(x=>x.kind==='favorite'));
+    assert.equal((await social(`/conversations/${conversation}/features`,c)).status,404);
+    ok(await social(`/messages/${sent.id}/reaction`,b,'DELETE',{emoji:'\u2764\ufe0f'}));
+    assert.equal(ok(await social(`/conversations/${conversation}/features`,a)).reactions.length,0);
+  });
+  await t.test('message links, unread state and external media are authorized',async()=>{
+    const location=ok(await social(`/messages/${sent.id}/location`,b));
+    assert.equal(location.conversationId,conversation);
+    assert.ok(location.messages.some(item=>item.id===sent.id));
+    assert.equal((await social(`/messages/${sent.id}/location`,c)).status,404);
+    ok(await social(`/conversations/${conversation}`,b,'PUT',{manual_unread:true}));
+    assert.ok(ok(await social('/state',b)).conversations[0].unread>=1);
+    const last=ok(await social(`/conversations/${conversation}/messages`,b)).messages.at(-1);
+    ok(await social(`/conversations/${conversation}/receipt`,b,'POST',{seq:last.seq,read:true}));
+    assert.equal(ok(await social('/state',b)).conversations[0].unread,0);
+    const media=ok(await social(`/conversations/${conversation}/messages`,a,'POST',{clientId:randomUUID(),kind:'external_media',payload:{provider:'7tv',id:'01FCY771D800007PQ2DF3GDTN6',name:'RainTime',url:'https://attacker.invalid/test'}})).message;
+    assert.equal(media.payload.url,'https://cdn.7tv.app/emote/01FCY771D800007PQ2DF3GDTN6/2x.webp');
+    const filtered=ok(await social(`/conversations/${conversation}/messages?kind=external_media&sender=other`,b)).messages;
+    assert.ok(filtered.some(item=>item.id===media.id));
+    assert.ok(filtered.every(item=>item.senderId===a && item.kind==='external_media'));
+    assert.equal((await social(`/conversations/${conversation}/messages`,a,'POST',{clientId:randomUUID(),kind:'external_media',payload:{provider:'klipy',id:'bad',type:'gif',url:'https://attacker.invalid/a.gif'}})).status,400);
+    assert.equal((await social('/media/search?provider=gif',a)).status,503);
+  });
   await t.test('attachments validate content and never bypass conversation authorization',async()=>{
     const invalid=new FormData();invalid.set('file',new File(['<script>alert(1)</script>'],'fake.png',{type:'image/png'}));
     assert.equal((await social(`/attachments?conversation=${conversation}`,a,'POST',invalid)).status,400);
@@ -104,6 +139,29 @@ test('friends, private chat and musical sessions run in the real D1/R2/DO runtim
     const plan=await db.prepare('EXPLAIN QUERY PLAN SELECT * FROM messages WHERE conversation_id=? AND seq<? ORDER BY seq DESC LIMIT 41').bind(conversation,999999).all();
     assert.ok(plan.results.some(r=>r.detail.includes('idx_messages_page')));
   });
+  await t.test('group conversations restrict membership, persist messages and track reading per member',async()=>{
+    await db.batch([db.prepare('INSERT INTO friendships(user_id,friend_id,created_at) VALUES(?,?,?)').bind(a,c,Date.now()),db.prepare('INSERT INTO friendships(user_id,friend_id,created_at) VALUES(?,?,?)').bind(c,a,Date.now())]);
+    const group=ok(await social('/groups',a,'POST',{name:'Amigos',members:[b,c]})).id;
+    assert.equal(ok(await social('/groups',c)).groups[0].id,group);
+    assert.equal((await social(`/groups/${group}/messages`,d)).status,404);
+    const clientId=randomUUID();
+    const sentGroup=ok(await social(`/groups/${group}/messages`,b,'POST',{text:'Olá grupo',clientId})).message;
+    assert.equal(ok(await social(`/groups/${group}/messages`,b,'POST',{text:'Olá grupo',clientId})).message.id,sentGroup.id);
+    assert.equal(ok(await social('/groups',c)).groups[0].unread,1);
+    ok(await social(`/groups/${group}/receipt`,c,'POST',{seq:sentGroup.seq}));
+    assert.equal(ok(await social('/groups',c)).groups[0].unread,0);
+    assert.equal(ok(await social(`/groups/${group}/messages`,c)).messages[0].text,'Olá grupo');
+    assert.equal((await social(`/group-messages/${sentGroup.id}`,c,'PUT',{text:'alteração indevida'})).status,404);
+    ok(await social(`/group-messages/${sentGroup.id}`,b,'PUT',{text:'Mensagem editada'}));
+    assert.equal(ok(await social(`/groups/${group}/messages`,c)).messages[0].text,'Mensagem editada');
+    ok(await social(`/group-messages/${sentGroup.id}`,b,'DELETE'));
+    assert.ok(ok(await social(`/groups/${group}/messages`,c)).messages[0].deletedAt);
+    await db.prepare('INSERT INTO user_blocks(user_id,blocked_id,created_at) VALUES(?,?,?)').bind(c,b,Date.now()).run();
+    assert.equal((await social(`/groups/${group}/messages`,c)).status,404);
+    assert.equal((await social(`/groups/${group}/messages`,b)).status,404);
+    await db.prepare('DELETE FROM user_blocks WHERE user_id=? AND blocked_id=?').bind(c,b).run();
+    await db.prepare('DELETE FROM friendships WHERE (user_id=? AND friend_id=?) OR (user_id=? AND friend_id=?)').bind(a,c,c,a).run();
+  });
   await t.test('presence, typing and repeated track position updates do not read or write D1',async()=>{
     ok(await social('/settings',a,'PUT',{show_activity:true,share_history:true}));
     const send=position=>wsA.send(JSON.stringify({type:'presence',trackId:track,playing:true,position}));send(10);
@@ -130,6 +188,11 @@ test('friends, private chat and musical sessions run in the real D1/R2/DO runtim
     assert.equal(ok(await social(`/listen/${session.id}`,b)).session.position,0);
     wsA.send(JSON.stringify({type:'listen_control',sessionId:session.id,position:45,playing:true}));
     await until(()=>eventsB.some(e=>e.type==='listening'&&e.session.position===45));
+    assert.equal((await social(`/listen/${session.id}/queue`,c,'POST',{trackId:track})).status,404);
+    assert.equal(ok(await social(`/listen/${session.id}/queue`,b,'POST',{trackId:track})).session.queue.length,1);
+    assert.equal((await social(`/listen/${session.id}/next`,b,'POST',{})).status,403);
+    const next=ok(await social(`/listen/${session.id}/next`,a,'POST',{})).session;
+    assert.equal(next.trackId,track); assert.equal(next.queue.length,0); assert.equal(next.position,0);
   });
   await t.test('block immediately removes access, presence, messages and synchronized sessions',async()=>{
     ok(await social(`/blocks/${a}`,b,'POST'));

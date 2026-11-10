@@ -2,10 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Bell, BellOff, Check, ChevronDown, Headphones, Maximize2, MessageCircle, Minimize2, Minus, Music2, Play, Search, Settings, Shield, UserMinus, UserPlus, Users, X } from 'lucide-react';
 import useSocial, { readLocal, saveLocal } from './useSocial.js';
 import ChatPane, { Avatar, statusLabel } from './ChatPane.jsx';
+import GroupPane from './GroupPane.jsx';
 import CallPanel, { useCalls } from './CallPanel.jsx';
 import './social.css';
 
-const sections = [ ['conversations', 'Conversas', MessageCircle], ['friends', 'Amigos', Users], ['requests', 'Solicitações', UserPlus], ['activity', 'Atividade musical', Music2], ['blocked', 'Bloqueados', Shield], ['settings', 'Privacidade', Settings] ];
+const sections = [ ['conversations', 'Conversas', MessageCircle], ['groups', 'Grupos', Users], ['friends', 'Amigos', Users], ['requests', 'Solicitações', UserPlus], ['activity', 'Atividade musical', Music2], ['blocked', 'Bloqueados', Shield], ['settings', 'Privacidade', Settings] ];
 function Modal({ title, onClose, children }) {
   const ref = useRef(null);
   useEffect(() => { ref.current?.showModal(); const node = ref.current; return () => node?.close(); }, []);
@@ -59,7 +60,7 @@ function Privacy({ social }) {
   </div>;
 }
 
-export default function SocialSystem({ user, api, apiBase, library, player, expanded, onExpand, onCollapse, onPlay, onOpenAlbum, onListening, onUnread }) {
+export default function SocialSystem({ user, api, apiBase, library, player, expanded, onExpand, onCollapse, onPlay, onFavorite, onOpenAlbum, onListening, onUnread }) {
   const [mode, setMode] = useState(() => readLocal(`consona-social-mode:${user.id}`, 'minimized'));
   const [view, setView] = useState('conversations'), [selected, setSelected] = useState(() => readLocal(`consona-chat:${user.id}`, ''));
   const [chatVisible, setChatVisible] = useState(false), [selectedFriend, setSelectedFriend] = useState('');
@@ -68,6 +69,8 @@ export default function SocialSystem({ user, api, apiBase, library, player, expa
   const [query, setQuery] = useState(''), [sort, setSort] = useState('presence'), [users, setUsers] = useState([]), [searchBusy, setSearchBusy] = useState(false);
   const [showArchived, setShowArchived] = useState(false), [notifications, setNotifications] = useState(false), [profile, setProfile] = useState(null), [report, setReport] = useState(null), [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false), [profileBusy, setProfileBusy] = useState(false);
+  const [sessionTrack, setSessionTrack] = useState('');
+  const [jumpMessage, setJumpMessage] = useState('');
   const social = useSocial({ user, api, player, onListening, onIncoming: id => { setMode('floating'); setChatVisible(true); setSelected(current => current || id); } });
   const calls = useCalls(social);
   const unread = social.state.conversations.reduce((total, c) => total + c.unread, 0), requests = social.state.incoming.length;
@@ -79,6 +82,18 @@ export default function SocialSystem({ user, api, apiBase, library, player, expa
   useEffect(() => { const timer = setTimeout(() => saveLocal(`consona-drafts:${user.id}`, drafts), 250); return () => clearTimeout(timer); }, [drafts, user.id]);
   useEffect(() => { onUnread(unread + requests); }, [unread, requests, onUnread]);
   useEffect(() => { if (expanded && selected) setChatVisible(true); }, [expanded]);
+  useEffect(() => {
+    if (social.loading) return;
+    const messageId = new URL(window.location.href).searchParams.get('socialMessage');
+    if (!messageId) return;
+    let active = true;
+    social.request(`/messages/${encodeURIComponent(messageId)}/location`).then(value => {
+      if (!active) return;
+      setSelected(value.conversationId); setView('conversations'); setChatVisible(true); setJumpMessage(messageId); onExpand();
+      const next = new URL(window.location.href); next.searchParams.delete('socialMessage'); window.history.replaceState(null, '', next);
+    }).catch(social.fail);
+    return () => { active = false; };
+  }, [social.loading]);
   useEffect(() => { if (!social.loading && selected && !social.state.conversations.some(c => c.id === selected)) { setSelected(''); setChatVisible(false); } }, [social.state.conversations, social.loading]);
   useEffect(() => { if (profile?.isFriend && !social.state.friends.some(f => f.id === profile.id)) setProfile(null); }, [social.state.friends]);
   useEffect(() => {
@@ -163,14 +178,15 @@ export default function SocialSystem({ user, api, apiBase, library, player, expa
       <button className="social-text-link" onClick={() => reportUser(friend)}>Denunciar usuário</button>
     </> : <div className="social-empty-small"><Headphones size={42}/><h3>Música aproxima</h3><p>Veja o que seus amigos estão ouvindo e descubra algo novo juntos.</p></div>}</aside>;
   }
-  const chat = <ChatPane user={user} social={social} conversation={conversation} friend={friend} library={library} apiBase={apiBase} onPlay={onPlay} onBack={() => setChatVisible(false)} onExpand={!expanded ? onExpand : null} onProfile={() => showProfile()} onCall={video => friend && calls.start(friend, video)} onReport={reportUser} drafts={drafts} setDrafts={setDrafts} scrolls={scrolls} currentTrack={player.current} expanded={expanded}/>;
-  const sessionBar = social.session && social.session.status !== 'ended' && <div className="social-session"><Headphones size={18}/><span>{social.session.status === 'pending' ? 'Convite enviado · aguardando aceitação' : `Ouvindo junto · ${social.session.hostId === user.id ? 'você é o anfitrião' : social.session.guestCanControl ? 'controle compartilhado' : 'o amigo controla a reprodução'}`}</span>{social.session.status === 'active' && social.session.hostId === user.id && <label><input type="checkbox" checked={social.session.guestCanControl} onChange={e => social.sendEvent({ type:'listen_control',sessionId:social.session.id,action:'permissions',guestCanControl:e.target.checked })}/>Permitir controle do amigo</label>}<button onClick={() => run(social.leaveSession)}>Sair</button></div>;
+  const chat = <ChatPane user={user} social={social} conversation={conversation} friend={friend} library={library} apiBase={apiBase} onPlay={onPlay} onFavorite={onFavorite} onBack={() => setChatVisible(false)} onMarkUnread={() => { setChatVisible(false); setSelected(''); }} onExpand={!expanded ? onExpand : null} onProfile={() => showProfile()} onCall={video => friend && calls.start(friend, video)} onReport={reportUser} drafts={drafts} setDrafts={setDrafts} scrolls={scrolls} currentTrack={player.current} expanded={expanded} jumpMessage={jumpMessage} clearJump={() => setJumpMessage('')}/>;
+  const sessionBar = social.session && social.session.status !== 'ended' && <div className="social-session"><Headphones size={18}/><span>{social.session.status === 'pending' ? 'Convite enviado · aguardando aceitação' : `Ouvindo junto · ${social.session.hostId === user.id ? 'você é o anfitrião' : social.session.guestCanControl ? 'controle compartilhado' : 'o amigo controla a reprodução'}`}</span>{social.session.status === 'active' && <><label>Fila <select aria-label="Música para fila compartilhada" value={sessionTrack} onChange={e => setSessionTrack(e.target.value)}><option value="">Escolher música</option>{library.tracks.map(track => <option key={track.id} value={track.id}>{track.title} — {track.artist}</option>)}</select></label><button disabled={!sessionTrack || busy} onClick={() => run(async () => { const value=await social.request(`/listen/${social.session.id}/queue`,'POST',{trackId:sessionTrack}); social.applySession(value.session); setSessionTrack(''); })}>Adicionar</button><span>{(social.session.queue || []).length} na fila</span>{(social.session.hostId === user.id || social.session.guestCanControl) && <button disabled={!social.session.queue?.length} onClick={() => run(async () => { const value=await social.request(`/listen/${social.session.id}/next`,'POST'); social.applySession(value.session); })}>Próxima da fila</button>}</>}{social.session.status === 'active' && social.session.hostId === user.id && <label><input type="checkbox" checked={social.session.guestCanControl} onChange={e => social.sendEvent({ type:'listen_control',sessionId:social.session.id,action:'permissions',guestCanControl:e.target.checked })}/>Permitir controle do amigo</label>}<button onClick={() => run(social.leaveSession)}>Sair</button></div>;
   return <div className={`social-root ${expanded ? 'social-expanded' : 'social-overlay'}`}>
     {expanded ? <main className={`social-central social-surface ${chatVisible ? 'social-chat-visible' : ''}`}>
       <header className="social-central-title social-gloss"><Users size={30}/><h1>Amigos e Conversas</h1><span className={`social-connection ${social.connection}`}>{social.connection === 'online' ? 'Conectado' : social.connection === 'connecting' ? 'Conectando...' : 'Reconectando...'}</span><button aria-label="Notificações sociais" onClick={() => setNotifications(true)}><Bell size={21}/>{social.state.notificationCount > 0 && <b className="social-badge">{social.state.notificationCount}</b>}</button><button title="Modo flutuante" aria-label="Modo flutuante" onClick={() => { setMode('floating'); onCollapse(); }}><Minimize2 size={21}/></button></header>
       {sessionBar}
       <div className="social-central-body"><nav className="social-navigation" aria-label="Navegação social">{sections.map(([key,label,Icon]) => <button key={key} aria-label={label} className={view === key ? 'active' : ''} onClick={() => { setView(key); setQuery(''); if (!['friends','conversations'].includes(key)) setChatVisible(false); }}><Icon size={23}/><span>{label}</span>{key === 'friends' ? <b className="social-badge">{social.state.friends.length}</b> : key === 'requests' && requests > 0 ? <b className="social-badge">{requests}</b> : null}</button>)}<div className="social-self"><Avatar person={user}/><strong>{user.displayName}</strong><small>@{user.username}</small><button onClick={() => setView('settings')}>{social.state.settings.presence === 'invisible' ? 'Invisível' : statusLabel({ status:social.state.settings.presence })}<ChevronDown size={12}/></button></div></nav>
         {['friends','conversations'].includes(view) ? <><aside className="social-contacts">{contactList()}</aside>{chat}{profilePanel()}</> : <section className="social-content">
+          {view === 'groups' && <GroupPane social={social} user={user}/>}
           {view === 'requests' && <><h2>Solicitações de amizade</h2><p>Uma nova conversa pode começar aqui.</p><h3>Recebidas ({requests})</h3>{social.state.incoming.map(p => friendRow(p, { requestType:'incoming' }))}{!requests && <p className="social-empty-small">Nenhuma solicitação pendente.</p>}<h3>Enviadas ({social.state.outgoing.length})</h3>{social.state.outgoing.map(p => friendRow(p, { requestType:'outgoing' }))}</>}
           {view === 'blocked' && <><h2>Usuários bloqueados</h2><p>Desbloquear não restaura a amizade automaticamente.</p>{social.state.blocked.map(p => friendRow(p, { blocked:true }))}{!social.state.blocked.length && <p className="social-empty-small">Você não bloqueou ninguém.</p>}</>}
           {view === 'settings' && <Privacy social={social}/>}

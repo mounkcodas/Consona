@@ -58,6 +58,11 @@ export default function useSocial({ user, api, player, onListening, onIncoming }
       if (read) setState(s => ({ ...s, conversations: s.conversations.map(c => c.id === id ? { ...c, unread: 0, lastReadSeq: Math.max(c.lastReadSeq, seq) } : c) }));
     } catch (error) { delete receiptSeq.current[key]; fail(error); }
   }, [request, fail]);
+  const markUnread = useCallback(async id => {
+    await request(`/conversations/${socialPath(id)}`, 'PUT', { manual_unread: true });
+    delete receiptSeq.current[`${id}:read`];
+    setState(s => ({ ...s, conversations: s.conversations.map(c => c.id === id ? { ...c, unread: Math.max(1, c.unread) } : c) }));
+  }, [request]);
   const loadMessages = useCallback(async (id, before) => {
     const key = `${id}:${before || 'latest'}`;
     if (pendingPages.current.has(key)) return;
@@ -158,7 +163,9 @@ export default function useSocial({ user, api, player, onListening, onIncoming }
                 notifyBrowser(m.id, friend?.displayName || 'Mensagem no Consona', m.kind === 'text' ? m.text : 'Compartilhou um arquivo ou música');
               }
             }
-          } else if (event.type === 'receipt') setState(s => ({ ...s, conversations: s.conversations.map(c => c.id !== event.conversationId ? c : event.actorId === user.id ? { ...c, lastReadSeq: event.readSeq, unread: event.readSeq >= c.lastSeq ? 0 : c.unread } : { ...c, peerReadSeq: event.readSeq, peerDeliveredSeq: event.deliveredSeq }) }));
+          } else if (event.type === 'group_update') window.dispatchEvent(new CustomEvent('consona-group-update', { detail: event.groupId }));
+          else if (event.type === 'message_features') window.dispatchEvent(new CustomEvent('consona-message-features', { detail: event.conversationId }));
+          else if (event.type === 'receipt') setState(s => ({ ...s, conversations: s.conversations.map(c => c.id !== event.conversationId ? c : event.actorId === user.id ? { ...c, lastReadSeq: event.readSeq, unread: event.readSeq >= c.lastSeq ? 0 : c.unread } : { ...c, peerReadSeq: event.readSeq, peerDeliveredSeq: event.deliveredSeq }) }));
           else if (event.type === 'typing') setTyping(t => ({ ...t, [event.conversationId]: event.typing ? Date.now() + 4500 : 0 }));
           else if (event.type === 'notification') {
             setState(s => ({ ...s, notifications: [event, ...s.notifications.filter(n => n.id !== event.id)].slice(0, 50), notificationCount: s.notificationCount + 1 }));
@@ -204,6 +211,6 @@ export default function useSocial({ user, api, player, onListening, onIncoming }
     catch (error) { await refresh(); throw error; }
   };
   const leaveSession = async () => { if (session?.id) await request(`/listen/${session.id}`, 'DELETE'); saveLocal(activeRoomKey, null); setSession(null); };
-  return { state, loading, connection, error, setError, fail, request, refresh, messages, pages, loadMessages, receiveMessages, receipt, openConversation, send, sendEvent, typing, updateSettings,
+  return { state, loading, connection, error, setError, fail, request, refresh, messages, pages, loadMessages, receiveMessages, receipt, markUnread, openConversation, send, sendEvent, typing, updateSettings,
     session, applySession, leaveSession, callEvent, clearCallEvent: () => setCallEvent([]) };
 }

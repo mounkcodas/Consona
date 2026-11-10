@@ -11,9 +11,32 @@ async function body(request) {
 }
 const result = (request, value, json, status = 200) => json(request, value, status);
 function safeText(value, limit) { return String(value || '').trim().slice(0, limit); }
+const sevenTvId = value => /^(?:[a-f0-9]{24}|[0-9a-hjkmnp-tv-z]{26})$/i.test(String(value || ''));
+async function providerJson(url) {
+  let response;
+  try { response = await fetch(url, { signal: AbortSignal.timeout(5000), redirect: 'error', headers: { Accept: 'application/json' } }); }
+  catch { throw problem('Serviço de mídia indisponível.', 503); }
+  if (!response.ok || !response.body) throw problem('Serviço de mídia indisponível.', 503);
+  const reader = response.body.getReader(); let length = 0; const chunks = [];
+  try {
+    while (true) { const { value, done } = await reader.read(); if (done) break; length += value.length; if (length > 1024 * 1024) throw new Error('large'); chunks.push(value); }
+    const data = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.length; }
+    return JSON.parse(new TextDecoder().decode(data));
+  } catch { await reader.cancel().catch(() => {}); throw problem('Resposta de mídia inválida.', 502); }
+}
 async function stopSessions(env, a, b) {
   const rows = await env.DB.prepare("SELECT id FROM listening_sessions WHERE ((host_id=? AND guest_id=?) OR (host_id=? AND guest_id=?)) AND status IN ('pending','active')").bind(a, b, b, a).all();
   for (const row of rows.results) await env.LISTENING.getByName(row.id).end(a);
+}
+async function groupMember(env, groupId, userId) {
+  const row = await env.DB.prepare(`SELECT gm.group_id FROM social_group_members gm WHERE gm.group_id=? AND gm.user_id=?
+    AND NOT EXISTS (SELECT 1 FROM social_group_members other JOIN user_blocks b ON (b.user_id=gm.user_id AND b.blocked_id=other.user_id) OR (b.user_id=other.user_id AND b.blocked_id=gm.user_id) WHERE other.group_id=gm.group_id)`).bind(groupId,userId).first();
+  if (!row) throw problem('Grupo indisponível.',404);
+}
+const groupMessage = row => ({ id:row.id, seq:row.seq, groupId:row.group_id, senderId:row.sender_id, senderName:row.display_name, clientId:row.client_id, text:row.body, createdAt:row.created_at, editedAt:row.edited_at, deletedAt:row.deleted_at });
+async function groupRecipients(env, groupId) {
+  const rows = await env.DB.prepare('SELECT user_id FROM social_group_members WHERE group_id=?').bind(groupId).all();
+  return rows.results.map(row => row.user_id);
 }
 async function openConversation(env, a, b) {
   await requireFriend(env, a, b);
@@ -27,7 +50,7 @@ async function openConversation(env, a, b) {
   return id;
 }
 async function conversations(env, userId) {
-  const rows = await env.DB.prepare(`SELECT c.*,cm.peer_id,cm.last_read_seq,cm.last_delivered_seq,cm.unread_count,cm.muted,cm.archived,
+  const rows = await env.DB.prepare(`SELECT c.*,cm.peer_id,cm.last_read_seq,cm.last_delivered_seq,cm.unread_count,cm.manual_unread,cm.muted,cm.archived,
     peer.last_read_seq AS peer_read_seq,peer.last_delivered_seq AS peer_delivered_seq,
     m.body AS preview,m.kind AS last_kind,m.sender_id AS last_sender,m.deleted_at AS last_deleted
     FROM conversation_members cm JOIN conversations c ON c.id=cm.conversation_id
@@ -37,7 +60,7 @@ async function conversations(env, userId) {
       AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.user_id=cm.user_id AND b.blocked_id=cm.peer_id) OR (b.user_id=cm.peer_id AND b.blocked_id=cm.user_id))
     ORDER BY c.updated_at DESC LIMIT 200`).bind(userId).all();
   return rows.results.map(row => ({ id: row.id, peerId: row.peer_id, updatedAt: row.updated_at, lastSeq: row.last_seq, lastReadSeq: row.last_read_seq,
-    peerReadSeq: row.peer_read_seq, peerDeliveredSeq: row.peer_delivered_seq, unread: row.unread_count, muted: Boolean(row.muted), archived: Boolean(row.archived),
+    peerReadSeq: row.peer_read_seq, peerDeliveredSeq: row.peer_delivered_seq, unread: Math.max(row.unread_count, row.manual_unread), muted: Boolean(row.muted), archived: Boolean(row.archived),
     preview: row.last_deleted ? 'Mensagem excluída' : row.preview || (row.last_kind && row.last_kind !== 'text' ? 'Compartilhou um arquivo ou música' : 'Comece uma conversa') }));
 }
 async function bootstrap(request, env, user) {
@@ -84,6 +107,81 @@ export async function socialRoutes(request, env, user, helpers) {
   try {
     const origin = url.origin;
     if (path === '/state' && method === 'GET') return json(request, await bootstrap(request, env, user));
+    if (path === '/groups' && method === 'GET') {
+      const rows = await env.DB.prepare(`SELECT g.*,gm.last_read_seq,(SELECT COUNT(*) FROM social_group_messages m WHERE m.group_id=g.id AND m.sender_id<>gm.user_id AND m.seq>gm.last_read_seq AND m.deleted_at IS NULL) AS unread
+        FROM social_groups g JOIN social_group_members gm ON gm.group_id=g.id WHERE gm.user_id=? AND NOT EXISTS (SELECT 1 FROM social_group_members other JOIN user_blocks b ON (b.user_id=gm.user_id AND b.blocked_id=other.user_id) OR (b.user_id=other.user_id AND b.blocked_id=gm.user_id) WHERE other.group_id=g.id) ORDER BY g.updated_at DESC LIMIT 100`).bind(user.id).all();
+      return json(request,{groups:rows.results.map(row=>({id:row.id,name:row.name,ownerId:row.owner_id,unread:row.unread,updatedAt:row.updated_at}))});
+    }
+    if (path === '/groups' && method === 'POST') {
+      await rate(env,user.id,'create_group',10,300);
+      const data = await body(request), name = safeText(data.name,80), invited = [...new Set(Array.isArray(data.members) ? data.members : [])];
+      if (!name || invited.length < 2 || invited.length > 20 || invited.some(id => !uuid(id) || id === user.id)) throw problem('Escolha um nome e entre 2 e 20 amigos.');
+      for (const id of invited) { await requireFriend(env,user.id,id); if ((await settings(env,id)).messages !== 'friends') throw problem('Um participante desativou mensagens.',403); }
+      const participants=[user.id,...invited], id=crypto.randomUUID(), now=Date.now();
+      for (let i=0;i<participants.length;i++) for (let j=i+1;j<participants.length;j++) if ((await relationship(env,participants[i],participants[j])).blocked) throw problem('Não foi possível criar este grupo.',403);
+      await env.DB.batch([env.DB.prepare('INSERT INTO social_groups(id,name,owner_id,created_at,updated_at) VALUES(?,?,?,?,?)').bind(id,name,user.id,now,now), ...participants.map(memberId=>env.DB.prepare('INSERT INTO social_group_members(group_id,user_id) VALUES(?,?)').bind(id,memberId))]);
+      await emit(env,participants,{type:'group_update',groupId:id});
+      return json(request,{id},201);
+    }
+    const groupMessages = path.match(/^\/groups\/([^/]+)\/messages$/);
+    if (groupMessages && method === 'GET') {
+      const id=groupMessages[1]; await groupMember(env,id,user.id);
+      const before=Math.max(1,Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER);
+      const rows=await env.DB.prepare('SELECT m.*,u.display_name FROM social_group_messages m JOIN users u ON u.id=m.sender_id WHERE m.group_id=? AND m.seq<? ORDER BY m.seq DESC LIMIT 41').bind(id,before).all();
+      const page=rows.results.slice(0,40).reverse(); return json(request,{messages:page.map(groupMessage),hasMore:rows.results.length>40,nextBefore:page[0]?.seq||null});
+    }
+    if (groupMessages && method === 'POST') {
+      const id=groupMessages[1]; await groupMember(env,id,user.id); await rate(env,user.id,'send_group_message',45);
+      const data=await body(request), text=safeText(data.text,4000); if (!text || !uuid(data.clientId)) throw problem('Mensagem inválida.');
+      const now=Date.now(), msgId=crypto.randomUUID();
+      await env.DB.batch([env.DB.prepare(`INSERT OR IGNORE INTO social_group_messages(id,group_id,sender_id,client_id,body,created_at)
+        SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM social_group_members gm WHERE gm.group_id=? AND gm.user_id=?
+          AND NOT EXISTS(SELECT 1 FROM social_group_members other JOIN user_blocks b ON (b.user_id=gm.user_id AND b.blocked_id=other.user_id) OR (b.user_id=other.user_id AND b.blocked_id=gm.user_id) WHERE other.group_id=gm.group_id))
+          AND NOT EXISTS(SELECT 1 FROM social_group_members other JOIN user_social_settings s ON s.user_id=other.user_id WHERE other.group_id=? AND other.user_id<>? AND s.messages='none')`).bind(msgId,id,user.id,data.clientId,text,now,id,user.id,id,user.id),env.DB.prepare('UPDATE social_groups SET updated_at=? WHERE id=? AND EXISTS(SELECT 1 FROM social_group_messages WHERE group_id=? AND sender_id=? AND client_id=?)').bind(now,id,id,user.id,data.clientId)]);
+      const row=await env.DB.prepare('SELECT m.*,u.display_name FROM social_group_messages m JOIN users u ON u.id=m.sender_id WHERE m.group_id=? AND m.sender_id=? AND m.client_id=?').bind(id,user.id,data.clientId).first();
+      if (!row) throw problem('As permissões do grupo mudaram.',403);
+      await emit(env,await groupRecipients(env,id),{type:'group_update',groupId:id}); return json(request,{message:groupMessage(row)},201);
+    }
+    const groupReceipt = path.match(/^\/groups\/([^/]+)\/receipt$/);
+    if (groupReceipt && method === 'POST') {
+      const id=groupReceipt[1]; await groupMember(env,id,user.id); const data=await body(request);
+      const last=await env.DB.prepare('SELECT COALESCE(MAX(seq),0) AS seq FROM social_group_messages WHERE group_id=?').bind(id).first();
+      const seq=Math.min(last.seq,Math.max(0,Math.floor(Number(data.seq)||0)));
+      await env.DB.prepare('UPDATE social_group_members SET last_read_seq=MAX(last_read_seq,?) WHERE group_id=? AND user_id=?').bind(seq,id,user.id).run(); return json(request,{ok:true});
+    }
+    const groupMessageMatch = path.match(/^\/group-messages\/([^/]+)$/);
+    if (groupMessageMatch && ['PUT','DELETE'].includes(method)) {
+      await rate(env,user.id,'edit_group_message',40);
+      const row=await env.DB.prepare('SELECT * FROM social_group_messages WHERE id=? AND sender_id=? AND deleted_at IS NULL').bind(groupMessageMatch[1],user.id).first();
+      if (!row) throw problem('Mensagem indisponível.',404);
+      await groupMember(env,row.group_id,user.id);
+      if (method==='PUT') { const data=await body(request), text=safeText(data.text,4000); if (!text) throw problem('Digite uma mensagem.'); await env.DB.prepare('UPDATE social_group_messages SET body=?,edited_at=? WHERE id=? AND sender_id=?').bind(text,Date.now(),row.id,user.id).run(); }
+      else await env.DB.prepare("UPDATE social_group_messages SET body='',deleted_at=? WHERE id=? AND sender_id=?").bind(Date.now(),row.id,user.id).run();
+      await emit(env,await groupRecipients(env,row.group_id),{type:'group_update',groupId:row.group_id}); return json(request,{ok:true});
+    }
+    if (path === '/media/search' && method === 'GET') {
+      await rate(env, user.id, 'media_search', 30);
+      const provider = url.searchParams.get('provider'), query = safeText(url.searchParams.get('q'), 80).toLowerCase();
+      if (provider === '7tv') {
+        const data = await providerJson('https://7tv.io/v3/emote-sets/global');
+        const items = (data.emotes || []).filter(item => sevenTvId(item.id) && (!query || String(item.name).toLowerCase().includes(query))).slice(0, 80)
+          .map(item => ({ provider: '7tv', id: item.id, name: safeText(item.name, 80), url: `https://cdn.7tv.app/emote/${item.id}/2x.webp` }));
+        return json(request, { items });
+      }
+      if (!['gif','sticker'].includes(provider)) throw problem('Provedor inválido.');
+      if (!env.KLIPY_API_KEY) throw problem('KLIPY não configurado no servidor.', 503);
+      const type = provider === 'gif' ? 'gifs' : 'stickers';
+      const endpoint = new URL(`https://api.klipy.com/api/v1/${encodeURIComponent(env.KLIPY_API_KEY)}/${type}/${query ? 'search' : 'trending'}`);
+      endpoint.searchParams.set('per_page', '24'); endpoint.searchParams.set('locale', 'br'); endpoint.searchParams.set('customer_id', user.id);
+      if (query) endpoint.searchParams.set('q', query);
+      const data = await providerJson(endpoint.href);
+      const items = (data?.data?.data || []).map(item => {
+        const source = item.file?.sm?.gif?.url || item.file?.md?.gif?.url || item.file?.hd?.gif?.url;
+        try { const parsed = new URL(source); if (parsed.protocol !== 'https:' || parsed.hostname !== 'static.klipy.com') return null;
+          return { provider: 'klipy', type: provider, id: safeText(item.slug, 150), name: safeText(item.title, 150), url: parsed.href }; } catch { return null; }
+      }).filter(item => item?.id);
+      return json(request, { items });
+    }
     if (path === '/ticket' && method === 'POST') {
       const ticket = await env.SOCIAL.getByName(user.id).ticket(user.id, user.session_hash, user.session_expires_at);
       return json(request, { url: `${origin.replace(/^http/, 'ws')}/api/social/connect?user=${user.id}&ticket=${ticket}` });
@@ -191,7 +289,7 @@ export async function socialRoutes(request, env, user, helpers) {
     if (conversationMatch && method === 'PUT') {
       const id = decodeURIComponent(conversationMatch[1]); await member(env, id, user.id);
       const data = await body(request);
-      const changes = ['muted','archived'].filter(key => data[key] !== undefined);
+      const changes = ['muted','archived','manual_unread'].filter(key => data[key] !== undefined);
       if (changes.length) await env.DB.prepare(`UPDATE conversation_members SET ${changes.map(key => `${key}=?`).join(',')} WHERE conversation_id=? AND user_id=?`).bind(...changes.map(key => data[key] ? 1 : 0), id, user.id).run();
       await emit(env, [user.id], { type: 'social_changed' }); return json(request, { ok: true });
     }
@@ -201,13 +299,19 @@ export async function socialRoutes(request, env, user, helpers) {
       const before = Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER;
       const after = Math.max(0, Number(url.searchParams.get('after')) || 0);
       const q = safeText(url.searchParams.get('q'), 120);
+      const sender = url.searchParams.get('sender'), kindFilter = url.searchParams.get('kind');
+      const since = Math.max(0, Number(url.searchParams.get('since')) || 0);
       let rows;
-      if (q.length >= 2) {
+      if (q.length >= 2 || sender || kindFilter || since) {
         await rate(env, user.id, 'message_search', 30);
-        const terms = q.split(/\s+/).map(token => '"' + token.replaceAll('"','""') + '"').join(' AND ');
-        const scope = id.replaceAll(':','').replaceAll('-','');
-        const query = `search_scope : "${scope}" AND body : (${terms})`;
-        rows = await env.DB.prepare(`SELECT m.* FROM social_message_search JOIN messages m ON m.seq=social_message_search.rowid WHERE social_message_search MATCH ? AND m.conversation_id=? AND m.deleted_at IS NULL AND m.seq<? ORDER BY m.seq DESC LIMIT 41`).bind(query, id, before).all();
+        const terms = q.length >= 2 ? q.split(/\s+/).map(token => '"' + token.replaceAll('"','""') + '"').join(' AND ') : '';
+        const scope = id.replaceAll(':','').replaceAll('-',''), clauses = ['m.conversation_id=?','m.deleted_at IS NULL','m.seq<?'], values = [id,before];
+        if (terms) { clauses.push('social_message_search MATCH ?'); values.push(`search_scope : "${scope}" AND body : (${terms})`); }
+        if (sender === 'me') { clauses.push('m.sender_id=?'); values.push(user.id); }
+        else if (sender === 'other') { clauses.push('m.sender_id<>?'); values.push(user.id); }
+        if (['text','track','album','playlist','attachment','external_media'].includes(kindFilter)) { clauses.push('m.kind=?'); values.push(kindFilter); }
+        if (since) { clauses.push('m.created_at>=?'); values.push(since); }
+        rows = await env.DB.prepare(`SELECT m.* FROM messages m ${terms ? 'JOIN social_message_search ON m.seq=social_message_search.rowid' : ''} WHERE ${clauses.join(' AND ')} ORDER BY m.seq DESC LIMIT 41`).bind(...values).all();
       } else rows = await env.DB.prepare(`SELECT * FROM messages WHERE conversation_id=? AND seq<? AND seq>? ORDER BY seq ${after ? 'ASC' : 'DESC'} LIMIT 41`).bind(id, before, after).all();
       const more = rows.results.length > 40, page = rows.results.slice(0, 40);
       if (!after) page.reverse();
@@ -218,9 +322,18 @@ export async function socialRoutes(request, env, user, helpers) {
       await rate(env, user.id, 'send_message', 45);
       if ((await settings(env, peer)).messages !== 'friends') throw problem('Este amigo desativou mensagens.', 403);
       const data = await body(request), text = safeText(data.text, 4000), kind = data.kind || 'text';
-      if (!uuid(data.clientId) || !['text','track','album','playlist','attachment'].includes(kind)) throw problem('Mensagem inválida.');
+      if (!uuid(data.clientId) || !['text','track','album','playlist','attachment','external_media'].includes(kind)) throw problem('Mensagem inválida.');
       let payload = {};
       if (kind === 'text' && !text) throw problem('Digite uma mensagem.');
+      if (kind === 'external_media') {
+        const item = data.payload || {};
+        if (item.provider === '7tv' && sevenTvId(item.id)) payload = { provider: '7tv', id: item.id, name: safeText(item.name, 80), url: `https://cdn.7tv.app/emote/${item.id}/2x.webp` };
+        else if (item.provider === 'klipy' && ['gif','sticker'].includes(item.type) && /^[a-z0-9_-]{1,150}$/i.test(item.id || '')) {
+          let parsed; try { parsed = new URL(item.url); } catch { throw problem('Mídia inválida.'); }
+          if (parsed.protocol !== 'https:' || parsed.hostname !== 'static.klipy.com' || parsed.username || parsed.password || parsed.port) throw problem('Mídia inválida.');
+          payload = { provider: 'klipy', type: item.type, id: item.id, name: safeText(item.name, 150), url: parsed.href };
+        } else throw problem('Mídia inválida.');
+      }
       if (['track','album','playlist'].includes(kind)) {
         const table = { track: 'tracks', album: 'albums', playlist: 'playlists' }[kind];
         const item = await env.DB.prepare(`SELECT * FROM ${table} WHERE id=?${kind === 'track' ? ' AND import_batch_id IS NULL' : ''}`).bind(String(data.itemId || '')).first();
@@ -236,14 +349,19 @@ export async function socialRoutes(request, env, user, helpers) {
         }
         payload = { id: item.id, name: item.name, mime: item.mime, size: item.size };
       }
+      const replyTo = data.replyTo || null;
+      if (replyTo) {
+        const target = await env.DB.prepare('SELECT id FROM messages WHERE id=? AND conversation_id=? AND deleted_at IS NULL').bind(replyTo, id).first();
+        if (!target) throw problem('Mensagem respondida indisponível.', 404);
+      }
       const messageId = crypto.randomUUID(), now = Date.now();
       const selector = 'SELECT seq FROM messages WHERE conversation_id=? AND sender_id=? AND client_id=?';
       const selectorArgs = [id, user.id, data.clientId];
       const statements = [
-        env.DB.prepare(`INSERT OR IGNORE INTO messages(id,conversation_id,sender_id,client_id,body,kind,payload_json,created_at)
-          SELECT ?,?,?,?,?,?,?,? WHERE ${authorizedSql} AND COALESCE((SELECT messages FROM user_social_settings WHERE user_id=?),'friends')='friends'
+        env.DB.prepare(`INSERT OR IGNORE INTO messages(id,conversation_id,sender_id,client_id,body,kind,payload_json,created_at,reply_to)
+          SELECT ?,?,?,?,?,?,?,?,? WHERE ${authorizedSql} AND COALESCE((SELECT messages FROM user_social_settings WHERE user_id=?),'friends')='friends'
           AND (?<>'attachment' OR EXISTS(SELECT 1 FROM social_attachments WHERE id=? AND message_id IS NULL AND created_at>?))`)
-          .bind(messageId, id, user.id, data.clientId, text, kind, encode(payload), now, ...authBindings(user.id, peer), peer, kind, payload.id || '', now - 86400000),
+          .bind(messageId, id, user.id, data.clientId, text, kind, encode(payload), now, replyTo, ...authBindings(user.id, peer), peer, kind, payload.id || '', now - 86400000),
         env.DB.prepare(`UPDATE conversations SET last_seq=(${selector}),updated_at=? WHERE id=? AND last_seq<COALESCE((${selector}),0)`).bind(...selectorArgs, now, id, ...selectorArgs),
         env.DB.prepare(`UPDATE conversation_members SET unread_count=unread_count+1,last_received_seq=(${selector}),archived=0 WHERE conversation_id=? AND user_id=? AND last_received_seq<COALESCE((${selector}),0)`)
           .bind(...selectorArgs, id, peer, ...selectorArgs),
@@ -257,18 +375,51 @@ export async function socialRoutes(request, env, user, helpers) {
       await emit(env, [user.id, peer], { type: 'message', actorId: user.id, message: message(row) });
       return json(request, { message: message(row) }, 201);
     }
+    const featuresMatch = path.match(/^\/conversations\/([^/]+)\/features$/);
+    if (featuresMatch && method === 'GET') {
+      const id = decodeURIComponent(featuresMatch[1]); await member(env, id, user.id);
+      const [reactions, marks] = await Promise.all([
+        env.DB.prepare('SELECT r.message_id,r.user_id,r.emoji FROM social_message_reactions r JOIN messages m ON m.id=r.message_id WHERE m.conversation_id=? AND m.deleted_at IS NULL ORDER BY m.seq DESC LIMIT 1000').bind(id).all(),
+        env.DB.prepare(`SELECT x.message_id,x.user_id,x.kind FROM social_message_marks x JOIN messages m ON m.id=x.message_id WHERE m.conversation_id=? AND m.deleted_at IS NULL AND (x.kind='pin' OR x.user_id=?) ORDER BY m.seq DESC LIMIT 1000`).bind(id,user.id).all(),
+      ]);
+      return json(request, { reactions: reactions.results, marks: marks.results });
+    }
+    const featureMatch = path.match(/^\/messages\/([^/]+)\/(reaction|pin|favorite)$/);
+    if (featureMatch && (method === 'PUT' || method === 'DELETE')) {
+      await rate(env,user.id,'message_feature',60);
+      const row = await env.DB.prepare('SELECT * FROM messages WHERE id=? AND deleted_at IS NULL').bind(featureMatch[1]).first();
+      if (!row) throw problem('Mensagem indisponível.',404);
+      const membership = await member(env,row.conversation_id,user.id), feature = featureMatch[2];
+      if (feature === 'reaction') {
+        const data = await body(request), emoji = String(data.emoji || '');
+        if (!emoji || [...emoji].length > 12 || !/^[\p{Extended_Pictographic}\p{Emoji_Component}\p{Regional_Indicator}\u200d\ufe0f]+$/u.test(emoji)) throw problem('Reação inválida.');
+        if (method === 'PUT') await env.DB.prepare('INSERT OR IGNORE INTO social_message_reactions(message_id,user_id,emoji) VALUES(?,?,?)').bind(row.id,user.id,emoji).run();
+        else await env.DB.prepare('DELETE FROM social_message_reactions WHERE message_id=? AND user_id=? AND emoji=?').bind(row.id,user.id,emoji).run();
+      } else if (method === 'PUT') await env.DB.prepare('INSERT OR IGNORE INTO social_message_marks(message_id,user_id,kind) VALUES(?,?,?)').bind(row.id,user.id,feature).run();
+      else await env.DB.prepare('DELETE FROM social_message_marks WHERE message_id=? AND user_id=? AND kind=?').bind(row.id,user.id,feature).run();
+      await emit(env, feature === 'favorite' ? [user.id] : [user.id,membership.peer_id], {type:'message_features',conversationId:row.conversation_id});
+      return json(request,{ok:true});
+    }
     const receiptMatch = path.match(/^\/conversations\/([^/]+)\/receipt$/);
     if (receiptMatch && method === 'POST') {
       const id = decodeURIComponent(receiptMatch[1]), membership = await member(env, id, user.id), data = await body(request);
       const last = await env.DB.prepare('SELECT last_seq FROM conversations WHERE id=?').bind(id).first();
       const seq = Math.min(last.last_seq, Math.max(0, Math.floor(Number(data.seq) || 0)));
-      await env.DB.prepare(`UPDATE conversation_members SET last_delivered_seq=MAX(last_delivered_seq,?),last_read_seq=MAX(last_read_seq,?),
+      await env.DB.prepare(`UPDATE conversation_members SET last_delivered_seq=MAX(last_delivered_seq,?),last_read_seq=MAX(last_read_seq,?),manual_unread=CASE WHEN ? THEN 0 ELSE manual_unread END,
         unread_count=(SELECT COUNT(*) FROM messages WHERE conversation_id=? AND sender_id<>? AND seq>MAX(conversation_members.last_read_seq,?)) WHERE conversation_id=? AND user_id=?`)
-        .bind(seq, data.read ? seq : 0, id, user.id, data.read ? seq : 0, id, user.id).run();
+        .bind(seq, data.read ? seq : 0, data.read ? 1 : 0, id, user.id, data.read ? seq : 0, id, user.id).run();
       const updated = await env.DB.prepare('SELECT last_read_seq,last_delivered_seq FROM conversation_members WHERE conversation_id=? AND user_id=?').bind(id, user.id).first();
       if (data.read) await env.DB.prepare("UPDATE social_notifications SET read_at=? WHERE user_id=? AND kind='message' AND json_extract(payload_json,'$.conversationId')=? AND read_at IS NULL").bind(Date.now(), user.id, id).run();
       await emit(env, [user.id, membership.peer_id], { type: 'receipt', actorId: user.id, conversationId: id, readSeq: updated.last_read_seq, deliveredSeq: updated.last_delivered_seq });
       return json(request, { ok: true });
+    }
+    const locateMatch = path.match(/^\/messages\/([^/]+)\/location$/);
+    if (locateMatch && method === 'GET') {
+      const row = await env.DB.prepare('SELECT * FROM messages WHERE id=?').bind(locateMatch[1]).first();
+      if (!row) throw problem('Mensagem indisponível.', 404);
+      await member(env, row.conversation_id, user.id);
+      const rows = await env.DB.prepare('SELECT * FROM messages WHERE conversation_id=? AND seq<=? ORDER BY seq DESC LIMIT 40').bind(row.conversation_id, row.seq).all();
+      return json(request, { conversationId: row.conversation_id, message: message(row), messages: rows.results.reverse().map(message) });
     }
     const messageMatch = path.match(/^\/messages\/([^/]+)$/);
     if (messageMatch && ['PUT','DELETE'].includes(method)) {
@@ -330,6 +481,13 @@ export async function socialRoutes(request, env, user, helpers) {
       await env.LISTENING.getByName(id).create(session);
       await notify(env, data.userId, user.id, 'listening_invite', { ...session, displayName: user.display_name });
       return json(request, { session }, 201);
+    }
+    const queueMatch = path.match(/^\/listen\/([^/]+)\/(queue|next)$/);
+    if (queueMatch && method === 'POST') {
+      await rate(env,user.id,'listen_queue',40);
+      const room=env.LISTENING.getByName(queueMatch[1]);
+      if (queueMatch[2] === 'queue') { const data=await body(request); return json(request,{session:await room.enqueue(user.id,String(data.trackId||''))}); }
+      return json(request,{session:await room.next(user.id)});
     }
     const listenMatch = path.match(/^\/listen\/([^/]+)$/);
     if (listenMatch && ['GET','POST','DELETE'].includes(method)) {
