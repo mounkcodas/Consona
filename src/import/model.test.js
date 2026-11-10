@@ -1,6 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { filenameMetadata, groupDetected, historyReducer, moveTracks, newDraft, orderAlbumTracks, validateDraft } from './model.js';
+import { addToPlaylist, filenameMetadata, groupDetected, historyReducer, moveTracks, newDraft, orderAlbumTracks, removeFromPlaylist, sortPlaylist, validateDraft, withPlaylists } from './model.js';
+
+test('playlists reuse tracks without moving them out of albums', () => {
+  const original = { ...newDraft(), albums: [{ key: 'album', title: 'Album', artist: 'Artist' }], playlists: [{ key: 'list', name: 'Mix', trackKeys: [] }], tracks: [
+    { key: 'a', title: 'Zeta', artist: 'Artist', albumKey: 'album', existingId: 'a' },
+    { key: 'b', title: 'Alpha', artist: 'Artist', albumKey: '', existingId: 'b' },
+  ] };
+  const added = addToPlaylist(original, 'list', ['a', 'b']);
+  assert.deepEqual(added.playlists[0].trackKeys, ['a', 'b']);
+  assert.equal(added.tracks[0].albumKey, 'album');
+  assert.equal(validateDraft(added).filter(issue => issue.severity === 'error').length, 0);
+  assert.deepEqual(sortPlaylist(added, 'list').playlists[0].trackKeys, ['b', 'a']);
+  assert.deepEqual(removeFromPlaylist(added, 'list', 'a').playlists[0].trackKeys, ['b']);
+  assert.deepEqual(original.playlists[0].trackKeys, []);
+});
+
+test('old local drafts gain an empty playlist collection', () => {
+  assert.deepEqual(withPlaylists({ version: 1, tracks: [], albums: [] }).playlists, []);
+});
 
 test('28 mixed tracks can be grouped into three independent albums', () => {
   const draft = newDraft();

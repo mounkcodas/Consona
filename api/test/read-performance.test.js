@@ -158,6 +158,29 @@ test('library caching preserves behavior while bounding D1 reads', async t => {
     assert.equal((await request(`/api/import/batches/${discardBatch}`, { method: 'DELETE' })).status, 200);
     assert.equal((await request('/api/library', { etag: published.headers.get('ETag') })).status, 304);
   });
+  await t.test('playlist drafts publish staged songs without changing existing album membership', async () => {
+    const existingPlaylistId = randomUUID(), stagedId = randomUUID(), batchId = randomUUID(), playlistKey = randomUUID();
+    await db.prepare("INSERT INTO playlists(id,name,added_by) VALUES(?,'Original',?)").bind(existingPlaylistId, userA).run();
+    await db.prepare('INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES(?,?,0)').bind(existingPlaylistId, trackIds[5]).run();
+    await db.prepare("INSERT INTO tracks(id,title,artist,album,audio_key,added_by,import_batch_id,import_item_key) VALUES(?,'New song','Artist','',?,?,?,?)")
+      .bind(stagedId, `tracks/${stagedId}/audio.mp3`, userA, batchId, randomUUID()).run();
+    const before = await request();
+    const payload = { batchId, albums: [], playlists: [{ key: playlistKey, existingId: existingPlaylistId, name: 'Renamed', initialName: 'Original', initialTrackIds: [trackIds[5]], trackIds: [stagedId, trackIds[5]] }],
+      tracks: [{ id: stagedId, title: 'New song', artist: 'Artist', albumKey: '', coverMode: 'individual' }, { id: trackIds[5], title: 'Track 5', artist: 'Artist', albumKey: '', coverMode: 'album' }] };
+    const commit = await request('/api/import/commit', { method: 'POST', body: payload });
+    assert.equal(commit.status, 200, JSON.stringify(commit.body));
+    assert.deepEqual((await request('/api/import/commit', { method: 'POST', body: payload })).body, commit.body);
+    const after = await request('/api/library', { etag: before.headers.get('ETag') });
+    assert.equal(after.status, 200);
+    assert.deepEqual(after.body.playlists.find(list => list.id === existingPlaylistId).trackIds, [stagedId, trackIds[5]]);
+    assert.equal(after.body.playlists.find(list => list.id === existingPlaylistId).name, 'Renamed');
+    assert.ok(after.body.albums.find(album => album.id === albumId).trackIds.includes(trackIds[5]));
+    assert.equal(after.body.tracks.find(track => track.id === stagedId).album, '');
+    const stale = await request('/api/import/commit', { method: 'POST', body: { batchId: randomUUID(), albums: [], playlists: [{ ...payload.playlists[0], name: 'Stale' }], tracks: payload.tracks } });
+    assert.equal(stale.status, 409);
+    const empty = await request('/api/import/commit', { method: 'POST', body: { batchId: randomUUID(), albums: [], playlists: [{ key: randomUUID(), name: 'Empty', trackIds: [] }], tracks: [] } });
+    assert.equal(empty.status, 200, JSON.stringify(empty.body));
+  });
   await t.test('history trimming retains the 200 most recent entries and uses an index', async () => {
     for (let i = 0; i < 205; i++) await db.prepare('INSERT INTO user_history(user_id,track_id) VALUES(?,?)').bind(userA, trackIds[1]).run();
     assert.equal((await request(`/api/tracks/${trackIds[2]}/history`, { method: 'POST' })).status, 201);

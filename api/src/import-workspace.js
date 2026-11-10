@@ -28,11 +28,12 @@ export async function importRoutes(request, env, user, helpers) {
   if (path === '/api/import/commit' && request.method === 'POST') {
     if (Number(request.headers.get('Content-Length')) > 1024 * 1024) return fail(request, 'Este rascunho excede o limite de dados.', 413);
     const payload = await request.json(), batchId = String(payload.batchId || '');
-    if (!uuid(batchId) || !Array.isArray(payload.albums) || !Array.isArray(payload.tracks) || !payload.albums.length || payload.albums.length > 100 || payload.tracks.length > 500) return fail(request, 'Revise a quantidade de músicas e álbuns do rascunho.');
+    if (!uuid(batchId) || !Array.isArray(payload.albums) || !Array.isArray(payload.tracks) || !Array.isArray(payload.playlists || []) || (!payload.albums.length && !(payload.playlists || []).length) || payload.albums.length > 100 || (payload.playlists || []).length > 100 || payload.tracks.length > 500) return fail(request, 'Revise a quantidade de m\u00fasicas, \u00e1lbuns e playlists do rascunho.');
     const committed = await env.DB.prepare('SELECT user_id,result_json FROM import_batches WHERE id=?').bind(batchId).first();
     if (committed) return committed.user_id === user.id ? json(request, metadata(committed.result_json)) : fail(request, 'Este rascunho pertence a outra conta.', 403);
-    const albumKeys = new Set(), trackIds = new Set(), existingIds = new Set();
+    const albumKeys = new Set(), trackIds = new Set(), existingIds = new Set(), playlistKeys = new Set(), existingPlaylistIds = new Set();
     const albums = payload.albums.map(item => ({ ...item, title: String(item.title || '').trim().slice(0, 180), artist: String(item.artist || '').trim().slice(0, 180) }));
+    const playlists = (payload.playlists || []).map(item => ({ ...item, name: String(item.name || '').trim().slice(0, 100) }));
     const tracks = payload.tracks.map(item => ({ ...item, title: String(item.title || '').trim().slice(0, 180), artist: String(item.artist || '').trim().slice(0, 180) }));
     for (const album of albums) {
       if (!uuid(album.key) || albumKeys.has(album.key) || !album.title || (album.existingId && !uuid(album.existingId))) return fail(request, 'Um dos álbuns está incompleto ou repetido.');
@@ -40,11 +41,18 @@ export async function importRoutes(request, env, user, helpers) {
       if (album.existingId) existingIds.add(album.existingId);
       albumKeys.add(album.key);
     }
+    for (const playlist of playlists) {
+      if (!uuid(playlist.key) || playlistKeys.has(playlist.key) || !playlist.name || !Array.isArray(playlist.trackIds) || playlist.trackIds.length > 500 || new Set(playlist.trackIds).size !== playlist.trackIds.length || (playlist.existingId && !uuid(playlist.existingId))) return fail(request, 'Uma playlist est\u00e1 incompleta ou repetida.');
+      if (playlist.existingId && existingPlaylistIds.has(playlist.existingId)) return fail(request, 'A mesma playlist aparece duas vezes no rascunho.');
+      playlistKeys.add(playlist.key);
+      if (playlist.existingId) existingPlaylistIds.add(playlist.existingId);
+    }
     for (const track of tracks) {
-      if (!uuid(track.id) || trackIds.has(track.id) || !track.title || !track.artist || !albumKeys.has(track.albumKey) || !['album', 'individual'].includes(track.coverMode)) return fail(request, 'Uma das músicas está incompleta, repetida ou sem álbum.');
+      if (!uuid(track.id) || trackIds.has(track.id) || !track.title || !track.artist || (track.albumKey && !albumKeys.has(track.albumKey)) || (!track.albumKey && !playlists.some(list => list.trackIds.includes(track.id))) || !['album', 'individual'].includes(track.coverMode)) return fail(request, 'Uma das m\u00fasicas est\u00e1 incompleta, repetida ou sem \u00e1lbum ou playlist.');
       if (track.identification && (typeof track.identification !== 'object' || Array.isArray(track.identification) || JSON.stringify(track.identification).length > 16000)) return fail(request, 'Os dados de identificação de uma música são inválidos.');
       trackIds.add(track.id);
     }
+    if (playlists.some(playlist => playlist.trackIds.some(id => !trackIds.has(id)))) return fail(request, 'Uma playlist cont\u00e9m m\u00fasica fora do rascunho.');
     const storedTracks = await readTracks(env, [...trackIds]);
     if (storedTracks.length !== tracks.length) return fail(request, 'Uma música foi removida da biblioteca. Atualize o rascunho.', 409);
     if (storedTracks.some(row => row.import_batch_id && (row.import_batch_id !== batchId || row.added_by !== user.id))) return fail(request, 'Uma música pertence a outro rascunho.', 403);
@@ -58,10 +66,20 @@ export async function importRoutes(request, env, user, helpers) {
       existingAlbums.push(...albumRows.results);
       memberships.push(...membershipRows.results);
     }
+    const existingPlaylists = [], playlistMemberships = [];
+    for (const ids of chunks([...existingPlaylistIds], 80)) {
+      const placeholders = ids.map(() => '?').join(',');
+      const [playlistRows, membershipRows] = await env.DB.batch([
+        env.DB.prepare(`SELECT id,name FROM playlists WHERE id IN (${placeholders})`).bind(...ids),
+        env.DB.prepare(`SELECT playlist_id,track_id FROM playlist_tracks WHERE playlist_id IN (${placeholders}) ORDER BY position,rowid`).bind(...ids),
+      ]);
+      existingPlaylists.push(...playlistRows.results);
+      playlistMemberships.push(...membershipRows.results);
+    }
     const assets = (await env.DB.prepare('SELECT * FROM import_assets WHERE user_id=? AND batch_id=?').bind(user.id, batchId).all()).results;
     if (tracks.some(track => track.coverAssetId && !assets.some(asset => asset.id === track.coverAssetId))) return fail(request, 'Selecione novamente uma das capas individuais.', 409);
     const pendingTracks = (await env.DB.prepare('SELECT id,audio_key,cover_key,main_key FROM tracks WHERE import_batch_id=? AND added_by=?').bind(batchId, user.id).all()).results;
-    const statements = [], albumIds = new Map();
+    const statements = [], albumIds = new Map(), playlistIds = new Map();
     for (const album of albums) {
       const stored = album.existingId ? existingAlbums.find(item => item.id === album.existingId) : null;
       if (album.existingId && !stored) return fail(request, `O álbum “${album.title}” foi removido. Escolha outro destino.`, 409);
@@ -82,12 +100,16 @@ export async function importRoutes(request, env, user, helpers) {
       if (stored) statements.push(env.DB.prepare('UPDATE albums SET title=?,artist=?,cover_key=?,cover_url=?,metadata_json=? WHERE id=?').bind(album.title, album.artist, coverKey, coverUrl, JSON.stringify(meta), id));
       else statements.push(env.DB.prepare('INSERT INTO albums (id,title,artist,cover_key,cover_url,metadata_json,added_by) VALUES (?,?,?,?,?,?,?)').bind(id, album.title, album.artist, coverKey, coverUrl, JSON.stringify(meta), user.id));
     }
-    // Small VALUES batches keep parameter counts bounded and publish the whole layout atomically.
-    for (const group of chunks(tracks, 14)) {
+    // Playlist-only tracks retain their existing album assignment.
+    const albumTracks = tracks.filter(track => track.albumKey);
+    for (const group of chunks(albumTracks, 14)) {
       const values = group.flatMap(row => [row.id, row.title, row.artist, albumIds.get(row.albumKey), albums.find(album => album.key === row.albumKey).title, JSON.stringify({ ...metadata(storedTracks.find(track => track.id === row.id)?.metadata_json), ...(row.identification ? { identification: row.identification } : {}), coverMode: row.coverMode })]);
       statements.push(env.DB.prepare(`WITH incoming(id,title,artist,album_id,album_title,meta_json) AS (VALUES ${group.map(() => '(?,?,?,?,?,?)').join(',')}) UPDATE tracks SET title=(SELECT title FROM incoming WHERE incoming.id=tracks.id),artist=(SELECT artist FROM incoming WHERE incoming.id=tracks.id),album=(SELECT album_title FROM incoming WHERE incoming.id=tracks.id),primary_album_id=(SELECT album_id FROM incoming WHERE incoming.id=tracks.id),metadata_json=(SELECT meta_json FROM incoming WHERE incoming.id=tracks.id),import_batch_id=NULL,import_item_key=NULL WHERE id IN (SELECT id FROM incoming)`).bind(...values));
     }
-    for (const ids of chunks([...trackIds], 80)) statements.push(env.DB.prepare(`DELETE FROM album_tracks WHERE track_id IN (${ids.map(() => '?').join(',')})`).bind(...ids));
+    for (const group of chunks(tracks.filter(track => !track.albumKey && storedTracks.find(row => row.id === track.id)?.import_batch_id), 80)) {
+      statements.push(env.DB.prepare(`UPDATE tracks SET import_batch_id=NULL,import_item_key=NULL WHERE id IN (${group.map(() => '?').join(',')})`).bind(...group.map(track => track.id)));
+    }
+    for (const ids of chunks(albumTracks.map(track => track.id), 80)) statements.push(env.DB.prepare(`DELETE FROM album_tracks WHERE track_id IN (${ids.map(() => '?').join(',')})`).bind(...ids));
     for (const track of tracks.filter(track => track.coverAssetId)) {
       const asset = assets.find(asset => asset.id === track.coverAssetId);
       statements.push(env.DB.prepare("UPDATE tracks SET cover_key=?,metadata_json=json_remove(metadata_json,'$.coverUrl','$.googleCoverProof') WHERE id=?").bind(asset.media_key, track.id));
@@ -101,7 +123,20 @@ export async function importRoutes(request, env, user, helpers) {
       next.forEach((row, position) => links.push([id, row.id, start + position]));
     }
     for (const group of chunks(links, 30)) statements.push(env.DB.prepare(`INSERT INTO album_tracks (album_id,track_id,position) VALUES ${group.map(() => '(?,?,?)').join(',')}`).bind(...group.flat()));
-    const result = { ok: true, tracks: tracks.length, albums: albums.length, albumIds: Object.fromEntries(albumIds) };
+    for (const playlist of playlists) {
+      const stored = playlist.existingId ? existingPlaylists.find(item => item.id === playlist.existingId) : null;
+      if (playlist.existingId && !stored) return fail(request, `A playlist “${playlist.name}” foi removida. Adicione-a novamente.`, 409);
+      const originalIds = playlistMemberships.filter(item => item.playlist_id === stored?.id).map(item => item.track_id);
+      if (stored && (stored.name !== playlist.initialName || JSON.stringify(originalIds) !== JSON.stringify(playlist.initialTrackIds || []))) return fail(request, `A playlist “${stored.name}” mudou desde a abertura do rascunho. Adicione-a novamente.`, 409);
+      const id = stored?.id || crypto.randomUUID(); playlistIds.set(playlist.key, id);
+      if (stored) statements.push(env.DB.prepare('UPDATE playlists SET name=? WHERE id=?').bind(playlist.name, id));
+      else statements.push(env.DB.prepare('INSERT INTO playlists (id,name,added_by) VALUES (?,?,?)').bind(id, playlist.name, user.id));
+      if (stored) statements.push(env.DB.prepare('DELETE FROM playlist_tracks WHERE playlist_id=?').bind(id));
+      for (const group of chunks(playlist.trackIds.map((trackId, position) => [id, trackId, position]), 30)) {
+        statements.push(env.DB.prepare(`INSERT INTO playlist_tracks (playlist_id,track_id,position) VALUES ${group.map(() => '(?,?,?)').join(',')}`).bind(...group.flat()));
+      }
+    }
+    const result = { ok: true, tracks: tracks.length, albums: albums.length, playlists: playlists.length, albumIds: Object.fromEntries(albumIds), playlistIds: Object.fromEntries(playlistIds) };
     statements.push(env.DB.prepare('DELETE FROM tracks WHERE import_batch_id=? AND added_by=?').bind(batchId, user.id));
     statements.push(env.DB.prepare('DELETE FROM import_assets WHERE user_id=? AND batch_id=?').bind(user.id, batchId));
     statements.push(env.DB.prepare('INSERT INTO import_batches (id,user_id,result_json) VALUES (?,?,?)').bind(batchId, user.id, JSON.stringify(result)));

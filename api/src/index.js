@@ -57,8 +57,8 @@ function serializeCatalog(request, rows) {
     const firstTrack = tracksById.get((itemsByAlbum.get(album.id) || [])[0]);
     return mediaUrl(request, album.cover_key) || album.cover_url || trackMetadata(firstTrack).coverUrl || mediaUrl(request, firstTrack?.cover_key) || '';
   };
-  const primaryAlbum = track => albumsById.get(track.primary_album_id);
-  const individualCover = track => trackMetadata(track).coverUrl || mediaUrl(request, track.cover_key) || '';
+  const primaryAlbum = track => albumsById.get(track?.primary_album_id);
+  const individualCover = track => trackMetadata(track).coverUrl || mediaUrl(request, track?.cover_key) || '';
   return {
     tracks: trackRows.results.map(track => ({
       id: track.id, title: track.title, artist: track.artist, album: primaryAlbum(track)?.title || track.album,
@@ -72,7 +72,7 @@ function serializeCatalog(request, rows) {
     })),
     playlists: playlistRows.results.map(list => ({
       id: list.id, name: list.name, trackIds: itemsByPlaylist.get(list.id) || [], addedBy: usersById.get(list.added_by) || null,
-      cover: mediaUrl(request, tracksById.get((itemsByPlaylist.get(list.id) || [])[0])?.cover_key),
+      cover: (() => { const first = tracksById.get((itemsByPlaylist.get(list.id) || [])[0]); return trackMetadata(first).coverMode === 'album' ? albumCover(primaryAlbum(first)) || individualCover(first) : individualCover(first) || albumCover(primaryAlbum(first)); })(),
     })),
     albums: albumRows.results.map(album => {
       const trackIds=itemsByAlbum.get(album.id)||[];
@@ -218,7 +218,7 @@ async function uploadTrack(request, env, user, staged = false) {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || JSON.stringify(metadata).length > 24000) return fail(request, 'Metadados inválidos ou muito extensos.');
   metadata.coverUrl = await approvedImageUrl(env,coverUrl||metadata.coverUrl,metadata.googleCoverProof);
   metadata.mainImageUrl = mainImageUrl;
-  if (!title || !artist || !album || !(audio instanceof File)) return fail(request, 'Informe música, artista, álbum e arquivo de áudio.');
+  if (!title || !artist || (!album && !staged) || !(audio instanceof File)) return fail(request, 'Informe m\u00fasica, artista e arquivo de \u00e1udio.');
   if (audio.size < 1 || audio.size > 32 * 1024 * 1024) return fail(request, 'O áudio deve ter até 32 MB.', 413);
   if (!(audio.type.startsWith('audio/') || /\.(mp3|m4a|aac|wav|ogg|flac|opus)$/i.test(audio.name))) return fail(request, 'O arquivo enviado não parece ser um áudio.');
   for (const image of [cover, mainImage]) {

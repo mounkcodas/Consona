@@ -1,5 +1,27 @@
 export const normalize = value => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-export const newDraft = () => ({ version: 1, batchId: crypto.randomUUID(), tracks: [], albums: [] });
+export const newDraft = () => ({ version: 1, batchId: crypto.randomUUID(), tracks: [], albums: [], playlists: [] });
+export const withPlaylists = draft => ({ ...draft, playlists: draft.playlists || [] });
+export function addToPlaylist(draft, playlistKey, keys, beforeKey = '') {
+  if (!draft.playlists.some(playlist => playlist.key === playlistKey)) return draft;
+  const valid = keys.filter(key => draft.tracks.some(row => row.key === key));
+  if (!valid.length || (beforeKey && valid.includes(beforeKey))) return draft;
+  return { ...draft, playlists: draft.playlists.map(playlist => {
+    if (playlist.key !== playlistKey) return playlist;
+    const remaining = (playlist.trackKeys || []).filter(key => !valid.includes(key));
+    const index = beforeKey ? remaining.indexOf(beforeKey) : -1;
+    remaining.splice(index < 0 ? remaining.length : index, 0, ...valid);
+    return { ...playlist, trackKeys: remaining };
+  }) };
+}
+export function removeFromPlaylist(draft, playlistKey, trackKey) {
+  return { ...draft, playlists: draft.playlists.map(playlist => playlist.key === playlistKey
+    ? { ...playlist, trackKeys: (playlist.trackKeys || []).filter(key => key !== trackKey) } : playlist) };
+}
+export function sortPlaylist(draft, playlistKey) {
+  const byKey = new Map(draft.tracks.map(row => [row.key, row]));
+  return { ...draft, playlists: draft.playlists.map(playlist => playlist.key === playlistKey
+    ? { ...playlist, trackKeys: [...(playlist.trackKeys || [])].sort((a, b) => (byKey.get(a)?.title || '').localeCompare(byKey.get(b)?.title || '', 'pt-BR', { sensitivity: 'base' })) } : playlist) };
+}
 export function filenameMetadata(file) {
   const path = (file.webkitRelativePath || '').split('/').filter(Boolean);
   const name = file.name.replace(/\.[^.]+$/, '').replace(/_/g, ' ').replace(/^\d+[\s.-]+/, '').trim();
@@ -60,13 +82,18 @@ export function orderAlbumTracks(draft, albumKey, catalogTracks = []) {
 }
 export function validateDraft(draft, libraryTracks = []) {
   const issues = [], hashes = new Map();
+  const playlists = draft.playlists || [];
+  for (const playlist of playlists) {
+    if (!playlist.name?.trim()) issues.push({ severity: 'error', key: playlist.key, message: 'Uma playlist est\u00e1 sem nome.' });
+    if ((playlist.trackKeys || []).some(key => !draft.tracks.some(row => row.key === key))) issues.push({ severity: 'error', key: playlist.key, message: `A playlist ${playlist.name} cont\u00e9m uma m\u00fasica removida do rascunho.` });
+  }
   for (const album of draft.albums) {
     if (!album.title.trim()) issues.push({ severity: 'error', key: album.key, message: 'Um álbum está sem nome.' });
     if (!album.artist.trim()) issues.push({ severity: 'warning', key: album.key, message: `Informe o artista de “${album.title || 'álbum sem nome'}” para facilitar a identificação.` });
   }
   for (const row of draft.tracks) {
     if (!row.title.trim() || !row.artist.trim()) issues.push({ severity: 'error', key: row.key, message: `${row.filename || row.title}: preencha nome e artista.` });
-    if (!draft.albums.some(album => album.key === row.albumKey)) issues.push({ severity: 'error', key: row.key, message: `“${row.title}” ainda está sem álbum. Arraste para um cartão.` });
+    if (!draft.albums.some(album => album.key === row.albumKey) && !playlists.some(playlist => (playlist.trackKeys || []).includes(row.key))) issues.push({ severity: 'error', key: row.key, message: `${row.title} ainda est\u00e1 sem \u00e1lbum ou playlist. Arraste para um cart\u00e3o.` });
     if (!row.existingId && !row.fileKey) issues.push({ severity: 'error', key: row.key, message: `O arquivo de “${row.title}” precisa ser selecionado novamente.` });
     if (row.fileHash) {
       if (hashes.has(row.fileHash)) issues.push({ severity: 'error', key: row.key, message: `Arquivo duplicado: “${row.filename}”. Remova uma das cópias.` });
