@@ -1,0 +1,3 @@
+ALTER TABLE social_group_messages ADD COLUMN reply_to TEXT REFERENCES social_group_messages(id) ON DELETE SET NULL;
+CREATE TABLE social_group_reactions (message_id TEXT NOT NULL REFERENCES social_group_messages(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, emoji TEXT NOT NULL, PRIMARY KEY(message_id,user_id,emoji));
+CREATE TABLE social_group_marks (message_id TEXT NOT NULL REFERENCES social_group_messages(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('pin','favorite')), PRIMARY KEY(message_id,user_id,kind));

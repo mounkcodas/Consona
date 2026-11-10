@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { defaults, parse, pairId, settings, requireFriend, problem, uuid } from './social-core.js';
+import { defaults, parse, pairId, settings, requireFriend, member, groupMember, problem, uuid } from './social-core.js';
 
 const ACTIVE_FOR = 95000;
 const encode = value => JSON.stringify(value);
@@ -22,20 +22,21 @@ export class SocialUser extends DurableObject {
     return next;
   }
   async refreshNow(id) {
-    const [profile, contacts, preferences] = await this.env.DB.batch([
+    const [profile, contacts, preferences, dmPeers] = await this.env.DB.batch([
       this.env.DB.prepare('SELECT id,username,display_name,avatar_key FROM users WHERE id=?').bind(id),
       this.env.DB.prepare(`SELECT f.friend_id FROM friendships f WHERE f.user_id=?
         AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.user_id=f.user_id AND b.blocked_id=f.friend_id) OR (b.user_id=f.friend_id AND b.blocked_id=f.user_id))`).bind(id),
       this.env.DB.prepare('SELECT * FROM user_social_settings WHERE user_id=?').bind(id),
+      this.env.DB.prepare("SELECT CASE WHEN sender_id=? THEN receiver_id ELSE sender_id END AS peer_id FROM social_dm_requests WHERE (sender_id=? OR receiver_id=?) AND status='accepted' AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.user_id=sender_id AND b.blocked_id=receiver_id) OR (b.user_id=receiver_id AND b.blocked_id=sender_id))").bind(id,id,id),
     ]);
     if (!profile.results[0]) { for (const ws of this.ctx.getWebSockets()) ws.close(4001, 'Conta indisponível'); return; }
     const before = this.config?.friends || [];
-    this.config = { ...profile.results[0], friends: contacts.results.map(row => row.friend_id), settings: { ...defaults, ...preferences.results[0] } };
+    this.config = { ...profile.results[0], friends: contacts.results.map(row => row.friend_id), dmPeers:dmPeers.results.map(row=>row.peer_id), settings: { ...defaults, ...preferences.results[0] } };
     this.put('config', this.config);
     const removed = before.filter(friend => !this.config.friends.includes(friend));
     for (const friend of removed) this.sql.exec('DELETE FROM state WHERE key=?', `peer:${friend}`);
     if (!this.config.settings.share_history || !this.config.settings.show_activity) this.put('history', []);
-    this.broadcast({ type: 'social_changed', removed, settings: this.config.settings });
+    this.broadcast({ type: 'social_changed', removed:removed.filter(friend=>!this.config.dmPeers.includes(friend)), settings: this.config.settings });
     // Reset recipients before returning from privacy/block changes.
     await Promise.all(removed.map(friend => this.env.SOCIAL.getByName(friend).forget(id)));
     await this.announce();
@@ -53,6 +54,7 @@ export class SocialUser extends DurableObject {
     // A live tab must not postpone cleanup of another tab's stale connection.
     if (previous == null || previous > deadline) await this.ctx.storage.setAlarm(deadline);
   }
+  async scheduleReminder(due) { await this.schedule(Math.max(0,due-Date.now())); }
   async ticket(id, sessionHash, expiresAt) {
     await this.ensure(id);
     if (this.get(`revoked:${sessionHash}`).at) throw problem('Sessão encerrada.', 401);
@@ -86,7 +88,7 @@ export class SocialUser extends DurableObject {
   }
   deliver(event) {
     // These methods are binding-only RPC. Browsers cannot call them directly.
-    if (event.actorId && event.actorId !== this.config.id && ['message', 'typing', 'receipt', 'call'].includes(event.type) && !this.config.friends?.includes(event.actorId)) return false;
+    if (event.actorId && event.actorId !== this.config.id && ['message', 'typing', 'receipt', 'call'].includes(event.type) && !this.config.friends?.includes(event.actorId) && !(event.type!=='call' && this.config.dmPeers?.includes(event.actorId))) return false;
     this.broadcast(event); return true;
   }
   forget(id) { this.sql.exec('DELETE FROM state WHERE key=?', `peer:${id}`); this.broadcast({ type: 'presence', userId: id, value: { status: 'offline', activity: null, hidden: true } }); }
@@ -163,7 +165,7 @@ export class SocialUser extends DurableObject {
         await this.schedule(ACTIVE_FOR);
         await this.announce();
       } else if (event.type === 'typing') {
-        if (!this.config.friends.includes(event.peerId) || event.conversationId !== pairId(identity.userId, event.peerId) || !this.consume('typing', 20, 60)) return;
+        if (!(this.config.friends.includes(event.peerId) || this.config.dmPeers?.includes(event.peerId)) || event.conversationId !== pairId(identity.userId, event.peerId) || !this.consume('typing', 20, 60)) return;
         await this.env.SOCIAL.getByName(event.peerId).deliver({ type: 'typing', actorId: identity.userId, conversationId: event.conversationId, typing: Boolean(event.typing) });
       } else if (event.type === 'listen_control' && typeof event.sessionId === 'string') {
         if (!this.consume('listen_control', 45, 60)) return;
@@ -183,6 +185,17 @@ export class SocialUser extends DurableObject {
   async webSocketClose(ws, code) { ws.close(code === 1006 ? 1000 : code, 'Desconectado'); await this.announce(); }
   async webSocketError(ws) { ws.close(1011, 'Reconecte'); await this.announce(); }
   async alarm() {
+    if(this.config?.id) {
+      const due=await this.env.DB.prepare('SELECT * FROM social_reminders WHERE user_id=? AND delivered_at IS NULL AND due_at<=? ORDER BY due_at LIMIT 100').bind(this.config.id,Date.now()).all();
+      for(const reminder of due.results) { let allowed=true; try {await member(this.env,reminder.conversation_id,this.config.id);if(!await this.env.DB.prepare('SELECT id FROM messages WHERE id=? AND deleted_at IS NULL').bind(reminder.message_id).first())allowed=false;} catch {allowed=false;}
+        if(allowed) { const payload={conversationId:reminder.conversation_id,messageId:reminder.message_id,displayName:'Lembrete'}; const id=`reminder:${reminder.id}`,at=Date.now(); const inserted=await this.env.DB.prepare("INSERT OR IGNORE INTO social_notifications(id,user_id,actor_id,kind,payload_json,created_at) VALUES(?,?,NULL,'reminder',?,?)").bind(id,this.config.id,encode(payload),at).run();if(inserted.meta.changes) this.broadcast({type:'notification',id,actorId:null,kind:'reminder',payload,createdAt:at}); }
+        await this.env.DB.prepare('UPDATE social_reminders SET delivered_at=? WHERE id=? AND user_id=?').bind(Date.now(),reminder.id,this.config.id).run();
+      }
+      const next=await this.env.DB.prepare('SELECT MIN(due_at) AS due FROM social_reminders WHERE user_id=? AND delivered_at IS NULL').bind(this.config.id).first(); if(next?.due) await this.scheduleReminder(next.due);
+      const groupDue=await this.env.DB.prepare('SELECT * FROM social_group_reminders WHERE user_id=? AND delivered_at IS NULL AND due_at<=? ORDER BY due_at LIMIT 100').bind(this.config.id,Date.now()).all();
+      for(const reminder of groupDue.results){let allowed=true;try{await groupMember(this.env,reminder.group_id,this.config.id);if(!await this.env.DB.prepare('SELECT id FROM social_group_messages WHERE id=? AND deleted_at IS NULL').bind(reminder.message_id).first())allowed=false;}catch{allowed=false;}if(allowed){const payload={groupId:reminder.group_id,messageId:reminder.message_id,displayName:'Lembrete'},id=`group-reminder:${reminder.id}`,at=Date.now();const inserted=await this.env.DB.prepare("INSERT OR IGNORE INTO social_notifications(id,user_id,actor_id,kind,payload_json,created_at) VALUES(?,?,NULL,'group_reminder',?,?)").bind(id,this.config.id,encode(payload),at).run();if(inserted.meta.changes)this.broadcast({type:'notification',id,actorId:null,kind:'group_reminder',payload,createdAt:at});}await this.env.DB.prepare('UPDATE social_group_reminders SET delivered_at=? WHERE id=? AND user_id=?').bind(Date.now(),reminder.id,this.config.id).run();}
+      const nextGroup=await this.env.DB.prepare('SELECT MIN(due_at) AS due FROM social_group_reminders WHERE user_id=? AND delivered_at IS NULL').bind(this.config.id).first();if(nextGroup?.due)await this.scheduleReminder(nextGroup.due);
+    }
     for (const row of this.sql.exec("SELECT key,value FROM state WHERE key LIKE 'ticket:%'").toArray()) if (parse(row.value).deadline < Date.now()) this.sql.exec('DELETE FROM state WHERE key=?', row.key);
     this.sql.exec("DELETE FROM state WHERE key LIKE 'revoked:%' AND json_extract(value,'$.at')<?", Date.now() - 31 * 86400000);
     for (const ws of this.ctx.getWebSockets()) { const data = ws.deserializeAttachment(); if (data.lastActive < Date.now() - ACTIVE_FOR || data.expiresAt <= Date.now()) ws.close(4001, 'Reconecte para atualizar sua presença'); }
@@ -212,9 +225,9 @@ export class ListeningSession extends DurableObject {
     // Re-read after network I/O: a concurrent block/end must never be undone.
     state = this.state();
     if (state.status !== 'pending' || state.expiresAt < Date.now()) throw problem('Convite encerrado.', 409);
-    state.status = 'active'; state.playing = true; state.updatedAt = Date.now(); state.expiresAt = Date.now() + 4 * 3600000; state.revision++;
+    state.status = 'active'; state.playing = true; state.updatedAt = Date.now(); state.startedAt=state.updatedAt; state.played=[{trackId:state.trackId,at:state.startedAt}]; state.expiresAt = Date.now() + 4 * 3600000; state.revision++;
     this.save(state);
-    await this.env.DB.prepare("UPDATE listening_sessions SET status='active' WHERE id=? AND status='pending'").bind(state.id).run();
+    await this.env.DB.prepare("UPDATE listening_sessions SET status='active',started_at=? WHERE id=? AND status='pending'").bind(state.startedAt,state.id).run();
     await this.ctx.storage.setAlarm(Date.now() + 4 * 3600000);
     await this.publish(state); return state;
   }
@@ -238,7 +251,7 @@ export class ListeningSession extends DurableObject {
     state = this.state();
     if (state.status !== 'active' || (userId !== state.hostId && !state.guestCanControl)) throw problem('Controle indisponível.',403);
     if (!state.queue?.length) throw problem('A fila está vazia.',409);
-    const item=state.queue.shift(); state.trackId=item.trackId; state.position=0; state.playing=true; state.updatedAt=Date.now(); state.revision++;
+    const item=state.queue.shift(); state.trackId=item.trackId; state.position=0; state.playing=true; state.updatedAt=Date.now(); state.played=[...(state.played||[]),{trackId:item.trackId,at:state.updatedAt}].slice(-500); state.revision++;
     this.save(state); await this.publish(state); return state;
   }
   async control(userId, event) {
@@ -250,7 +263,7 @@ export class ListeningSession extends DurableObject {
     if (state.status !== 'active' || (userId !== state.hostId && !state.guestCanControl)) throw problem('Sessão encerrada ou controle indisponível.', 403);
     if (event.action === 'permissions' && userId === state.hostId) state.guestCanControl = Boolean(event.guestCanControl);
     else {
-      if (event.trackId) state.trackId = event.trackId;
+      if (event.trackId && event.trackId!==state.trackId) { state.trackId = event.trackId; state.played=[...(state.played||[]),{trackId:event.trackId,at:Date.now()}].slice(-500); }
       state.position = Math.min(86400, Math.max(0, Number(event.position) || 0)); state.playing = Boolean(event.playing);
     }
     state.updatedAt = Date.now(); state.revision++;
@@ -264,7 +277,7 @@ export class ListeningSession extends DurableObject {
     if (!state.id || ![state.hostId, state.guestId].includes(userId) || state.status === 'ended') return;
     state.status = 'ended'; state.revision++; state.updatedAt = Date.now();
     this.save(state);
-    await this.env.DB.prepare("UPDATE listening_sessions SET status='ended' WHERE id=?").bind(state.id).run();
+    await this.env.DB.prepare("UPDATE listening_sessions SET status='ended',ended_at=?,history_json=? WHERE id=?").bind(state.updatedAt,encode(state.played||[]),state.id).run();
     await this.publish(state); await this.ctx.storage.deleteAlarm();
   }
   async alarm() { const state = this.state(); if (state.id) await this.end(state.hostId); }

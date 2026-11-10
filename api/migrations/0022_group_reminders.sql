@@ -1,0 +1,2 @@
+CREATE TABLE social_group_reminders (id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,message_id TEXT NOT NULL REFERENCES social_group_messages(id) ON DELETE CASCADE,group_id TEXT NOT NULL REFERENCES social_groups(id) ON DELETE CASCADE,due_at INTEGER NOT NULL,delivered_at INTEGER,created_at INTEGER NOT NULL);
+CREATE INDEX idx_social_group_reminders_due ON social_group_reminders(user_id,due_at) WHERE delivered_at IS NULL;

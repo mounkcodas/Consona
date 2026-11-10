@@ -1,4 +1,4 @@
-export const defaults = Object.freeze({ requests: 'everyone', messages: 'friends', show_presence: 1, show_activity: 0, share_history: 0, listening_invites: 'friends', call_invites: 'none', presence: 'online', status_text: '', browser_notifications: 0 });
+export const defaults = Object.freeze({ requests: 'everyone', messages: 'friends', dm_requests: 1, show_presence: 1, show_activity: 0, share_history: 0, share_favorites: 0, public_music_profile:0, listening_invites: 'friends', call_invites: 'none', presence: 'online', status_text: '', browser_notifications: 0 });
 export const uuid = value => /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(String(value || ''));
 export const pairId = (a, b) => [a, b].sort().join(':');
 export const parse = value => { try { return JSON.parse(value || '{}'); } catch { return {}; } };
@@ -25,8 +25,14 @@ export async function requireFriend(env, a, b) {
 export async function member(env, id, userId) {
   const row = await env.DB.prepare('SELECT * FROM conversation_members WHERE conversation_id=? AND user_id=?').bind(id, userId).first();
   if (!row) throw problem('Conversa não encontrada.', 404);
-  await requireFriend(env, userId, row.peer_id);
+  const relation=await relationship(env,userId,row.peer_id);
+  if(relation.blocked || (!relation.friends && !await env.DB.prepare("SELECT pair_id FROM social_dm_requests WHERE pair_id=? AND status='accepted'").bind(pairId(userId,row.peer_id)).first())) throw problem('Esta conversa está indisponível.',403);
   return row;
+}
+export async function groupMember(env, groupId, userId) {
+  const row = await env.DB.prepare(`SELECT gm.group_id FROM social_group_members gm WHERE gm.group_id=? AND gm.user_id=?
+    AND NOT EXISTS (SELECT 1 FROM social_group_members other JOIN user_blocks b ON (b.user_id=gm.user_id AND b.blocked_id=other.user_id) OR (b.user_id=other.user_id AND b.blocked_id=gm.user_id) WHERE other.group_id=gm.group_id)`).bind(groupId,userId).first();
+  if (!row) throw problem('Grupo indisponível.',404);
 }
 export async function rate(env, userId, scope, count = 60, seconds = 60) {
   if (!await env.SOCIAL.getByName(userId).consume(scope, count, seconds)) throw problem('Muitas tentativas. Aguarde um momento e tente novamente.', 429);
@@ -42,6 +48,6 @@ export async function emit(env, ids, event) {
 export async function refreshPeople(env, ids) {
   await Promise.all([...new Set(ids)].map(id => env.SOCIAL.getByName(id).refresh(id)));
 }
-export const authorizedSql = `EXISTS(SELECT 1 FROM friendships f WHERE f.user_id=? AND f.friend_id=?)
+export const authorizedSql = `(EXISTS(SELECT 1 FROM friendships f WHERE f.user_id=? AND f.friend_id=?) OR EXISTS(SELECT 1 FROM social_dm_requests r WHERE r.pair_id=CASE WHEN ? < ? THEN ?||':'||? ELSE ?||':'||? END AND r.status='accepted'))
   AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.user_id=? AND b.blocked_id=?) OR (b.user_id=? AND b.blocked_id=?))`;
-export const authBindings = (a, b) => [a, b, a, b, b, a];
+export const authBindings = (a, b) => [a,b,a,b,a,b,b,a,a,b,b,a];

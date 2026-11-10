@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 export const readLocal = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
 export const saveLocal = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} };
 export const socialPath = id => encodeURIComponent(id);
-const initial = { friends: [], incoming: [], outgoing: [], blocked: [], conversations: [], notifications: [], settings: {}, presence: {}, notificationCount: 0 };
+const initial = { friends: [], incoming: [], outgoing: [], blocked: [], dmContacts:[], dmIncoming:[], dmOutgoing:[], conversations: [], notifications: [], settings: {}, presence: {}, notificationCount: 0 };
 export function mergeMessages(rows = [], incoming = []) {
   const map = new Map(rows.map(row => [row.clientId ? `${row.senderId}:${row.clientId}` : row.id, row]));
   for (const row of incoming) map.set(row.clientId ? `${row.senderId}:${row.clientId}` : row.id, row);
@@ -18,6 +18,8 @@ export default function useSocial({ user, api, player, onListening, onIncoming }
   const [messages, setMessages] = useState({});
   const [pages, setPages] = useState({});
   const [typing, setTyping] = useState({});
+  const [groupUnread, setGroupUnread] = useState(0);
+  const [lastfm,setLastfm]=useState({configured:false,connected:false,username:''});
   const [session, setSession] = useState(null);
   const [callEvent, setCallEvent] = useState([]);
   const socket = useRef(null), latest = useRef({}), pendingPages = useRef(new Set()), receiptSeq = useRef({});
@@ -28,6 +30,15 @@ export default function useSocial({ user, api, player, onListening, onIncoming }
   const request = useCallback((path, method = 'GET', data) => api(`/api/social${path}`, { method, ...(data instanceof FormData ? { body: data } : data === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }) }), [api]);
   latest.current = { state, messages, player, onListening, onIncoming, session };
   const fail = useCallback(error => { if (error?.name !== 'AbortError') setError(error?.message || String(error)); }, []);
+  const refreshGroupUnread = useCallback(async () => { try { const value=await request('/groups'); setGroupUnread(value.groups.reduce((total,group)=>total+group.unread,0)); } catch (error) { fail(error); } },[request,fail]);
+  const refreshLastfm = useCallback(async()=>{try{setLastfm(await request('/lastfm/state'));}catch(error){fail(error);}},[request,fail]);
+  useEffect(()=>{refreshGroupUnread();},[refreshGroupUnread]);
+  useEffect(()=>{refreshLastfm();},[refreshLastfm]);
+  useEffect(()=>{const audio=player.audioRef.current,trackId=player.current?.id;if(!audio || !trackId || !lastfm.connected)return;const state={clientId:crypto.randomUUID(),startedAt:0,played:0,lastPosition:null,lastWall:0,submitted:false,retryAfter:0};
+    function progress(){if(audio.paused || audio.seeking)return;const now=Date.now(),position=audio.currentTime;if(!state.startedAt)state.startedAt=now;if(state.lastPosition!==null){const delta=position-state.lastPosition,wall=(now-state.lastWall)/1000;if(delta>0 && delta<5 && wall>0 && wall<10)state.played+=Math.min(delta,wall+0.5);}state.lastPosition=position;state.lastWall=now;const duration=Number.isFinite(audio.duration)?audio.duration:player.current?.seconds;if(duration>=30 && state.played>=Math.min(duration/2,240) && !state.submitted && now>=state.retryAfter){state.submitted=true;request('/lastfm/scrobble','POST',{trackId,clientId:state.clientId,startedAt:state.startedAt,playedSeconds:state.played}).catch(()=>{state.submitted=false;state.retryAfter=Date.now()+60000;});}}
+    function seek(){state.lastPosition=audio.currentTime;state.lastWall=Date.now();}function ended(){state.clientId=crypto.randomUUID();state.startedAt=0;state.played=0;state.lastPosition=null;state.submitted=false;state.retryAfter=0;}
+    audio.addEventListener('timeupdate',progress);audio.addEventListener('seeked',seek);audio.addEventListener('ended',ended);return()=>{audio.removeEventListener('timeupdate',progress);audio.removeEventListener('seeked',seek);audio.removeEventListener('ended',ended);};
+  },[player.audioRef,player.current?.id,lastfm.connected,request]);
   const refresh = useCallback(async () => {
     if (refreshInFlight.current) return refreshInFlight.current;
     refreshInFlight.current = request('/state').then(value => {
@@ -163,7 +174,8 @@ export default function useSocial({ user, api, player, onListening, onIncoming }
                 notifyBrowser(m.id, friend?.displayName || 'Mensagem no Consona', m.kind === 'text' ? m.text : 'Compartilhou um arquivo ou música');
               }
             }
-          } else if (event.type === 'group_update') window.dispatchEvent(new CustomEvent('consona-group-update', { detail: event.groupId }));
+          } else if (event.type === 'group_update') { refreshGroupUnread(); window.dispatchEvent(new CustomEvent('consona-group-update', { detail: event.groupId })); }
+          else if (event.type === 'group_typing') window.dispatchEvent(new CustomEvent('consona-group-typing', { detail: event }));
           else if (event.type === 'message_features') window.dispatchEvent(new CustomEvent('consona-message-features', { detail: event.conversationId }));
           else if (event.type === 'receipt') setState(s => ({ ...s, conversations: s.conversations.map(c => c.id !== event.conversationId ? c : event.actorId === user.id ? { ...c, lastReadSeq: event.readSeq, unread: event.readSeq >= c.lastSeq ? 0 : c.unread } : { ...c, peerReadSeq: event.readSeq, peerDeliveredSeq: event.deliveredSeq }) }));
           else if (event.type === 'typing') setTyping(t => ({ ...t, [event.conversationId]: event.typing ? Date.now() + 4500 : 0 }));
@@ -211,6 +223,6 @@ export default function useSocial({ user, api, player, onListening, onIncoming }
     catch (error) { await refresh(); throw error; }
   };
   const leaveSession = async () => { if (session?.id) await request(`/listen/${session.id}`, 'DELETE'); saveLocal(activeRoomKey, null); setSession(null); };
-  return { state, loading, connection, error, setError, fail, request, refresh, messages, pages, loadMessages, receiveMessages, receipt, markUnread, openConversation, send, sendEvent, typing, updateSettings,
+  return { state, loading, connection, error, setError, fail, request, refresh, groupUnread, refreshGroupUnread, lastfm, refreshLastfm, messages, pages, loadMessages, receiveMessages, receipt, markUnread, openConversation, send, sendEvent, typing, updateSettings,
     session, applySession, leaveSession, callEvent, clearCallEvent: () => setCallEvent([]) };
 }

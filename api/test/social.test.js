@@ -14,7 +14,7 @@ const base = 'https://social.test', a = randomUUID(), b = randomUUID(), c = rand
 const tokens = new Map([[a,'a'.repeat(64)],[b,'b'.repeat(64)],[c,'c'.repeat(64)],[d,'d'.repeat(64)]]);
 test('friends, private chat and musical sessions run in the real D1/R2/DO runtime', async t => {
   const mf = new Miniflare(convertV4MiniflareOptions({ modules: ['api/test/social-harness.js','api/src/index.js','api/src/import-workspace.js','api/src/library-cache.js','api/src/social-api.js','api/src/social-core.js','api/src/social-realtime.js'].map(path => ({ type:'ESModule',path:resolve(path) })),
-    compatibilityDate:'2026-11-03', d1Databases:['DB'], r2Buckets:['MEDIA'], durableObjects:{ SOCIAL:{className:'MeasuredSocialUser',useSQLite:true}, LISTENING:{className:'ListeningSession',useSQLite:true} } }));
+    compatibilityDate:'2026-11-03', compatibilityFlags:['nodejs_compat'], bindings:{LASTFM_API_SECRET:'test-lastfm-key',LASTFM_SHARED_SECRET:'test-lastfm-secret'}, d1Databases:['DB'], r2Buckets:['MEDIA'], durableObjects:{ SOCIAL:{className:'MeasuredSocialUser',useSQLite:true}, LISTENING:{className:'ListeningSession',useSQLite:true} } }));
   t.after(() => mf.dispose());
   const db = await mf.getD1Database('DB');
   for (const file of (await readdir('api/migrations')).sort()) for (const sql of statements(await readFile(`api/migrations/${file}`,'utf8'))) await db.prepare(sql).run();
@@ -73,6 +73,8 @@ test('friends, private chat and musical sessions run in the real D1/R2/DO runtim
     await until(()=>eventsA.some(e=>e.type==='receipt'&&e.readSeq===sent.seq));
     ok(await social(`/messages/${sent.id}`,a,'PUT',{text:'Música editada'}));
     assert.equal(ok(await social(`/conversations/${conversation}/messages?q=editada`,b)).messages[0].id,sent.id);
+    const timed=ok(await social(`/conversations/${conversation}/messages`,a,'POST',{kind:'track',itemId:track,position:999,clientId:randomUUID()})).message;
+    assert.equal(timed.payload.position,240);
   });
   await t.test('replies, reactions and marks remain scoped to conversation members',async()=>{
     const reply=ok(await social(`/conversations/${conversation}/messages`,b,'POST',{text:'Resposta',replyTo:sent.id,clientId:randomUUID()})).message;
@@ -80,13 +82,29 @@ test('friends, private chat and musical sessions run in the real D1/R2/DO runtim
     assert.equal((await social(`/conversations/${conversation}/messages`,b,'POST',{text:'Resposta',replyTo:randomUUID(),clientId:randomUUID()})).status,404);
     assert.equal((await social(`/messages/${sent.id}/reaction`,c,'PUT',{emoji:'\u2764\ufe0f'})).status,404);
     ok(await social(`/messages/${sent.id}/reaction`,b,'PUT',{emoji:'\u2764\ufe0f'}));
+    ok(await social(`/messages/${sent.id}/reaction`,b,'PUT',{emoji:'\u2764\ufe0f',super:true}));
     ok(await social(`/messages/${sent.id}/pin`,a,'PUT',{}));
     ok(await social(`/messages/${sent.id}/favorite`,a,'PUT',{}));
     const aFeatures=ok(await social(`/conversations/${conversation}/features`,a));
     const bFeatures=ok(await social(`/conversations/${conversation}/features`,b));
     assert.equal(aFeatures.reactions[0].emoji,'\u2764\ufe0f');
+    assert.equal(aFeatures.reactions[0].is_super,1);
     assert.ok(bFeatures.marks.some(x=>x.kind==='pin'));
     assert.ok(!bFeatures.marks.some(x=>x.kind==='favorite'));
+    assert.equal(ok(await social(`/conversations/${conversation}/marked?kind=favorite`,a)).messages[0].id,sent.id);
+    assert.equal(ok(await social(`/conversations/${conversation}/marked?kind=favorite`,b)).messages.length,0);
+    assert.equal((await social(`/conversations/${conversation}/marked?kind=pin`,c)).status,404);
+    assert.equal((await social(`/messages/${sent.id}/reminders`,c,'POST',{dueAt:Date.now()+60000})).status,404);
+    const reminder=ok(await social(`/messages/${sent.id}/reminders`,a,'POST',{dueAt:Date.now()+60000}));
+    assert.ok(ok(await social('/reminders',a)).reminders.some(item=>item.id===reminder.id));
+    ok(await social(`/reminders/${reminder.id}`,b,'DELETE'));
+    assert.ok(ok(await social('/reminders',a)).reminders.some(item=>item.id===reminder.id));
+    ok(await social(`/reminders/${reminder.id}`,a,'DELETE'));
+    const dueReminder=ok(await social(`/messages/${sent.id}/reminders`,a,'POST',{dueAt:Date.now()+60000}));
+    await db.prepare('UPDATE social_reminders SET due_at=? WHERE id=?').bind(Date.now()-1,dueReminder.id).run();
+    const socialNamespace=await mf.getDurableObjectNamespace('SOCIAL'); await socialNamespace.getByName(a).scheduleReminder(Date.now());
+    await until(()=>eventsA.some(event=>event.type==='notification' && event.id===`reminder:${dueReminder.id}`));
+    assert.ok(ok(await social('/state',a)).notifications.some(item=>item.id===`reminder:${dueReminder.id}`));
     assert.equal((await social(`/conversations/${conversation}/features`,c)).status,404);
     ok(await social(`/messages/${sent.id}/reaction`,b,'DELETE',{emoji:'\u2764\ufe0f'}));
     assert.equal(ok(await social(`/conversations/${conversation}/features`,a)).reactions.length,0);
@@ -103,6 +121,8 @@ test('friends, private chat and musical sessions run in the real D1/R2/DO runtim
     assert.equal(ok(await social('/state',b)).conversations[0].unread,0);
     const media=ok(await social(`/conversations/${conversation}/messages`,a,'POST',{clientId:randomUUID(),kind:'external_media',payload:{provider:'7tv',id:'01FCY771D800007PQ2DF3GDTN6',name:'RainTime',url:'https://attacker.invalid/test'}})).message;
     assert.equal(media.payload.url,'https://cdn.7tv.app/emote/01FCY771D800007PQ2DF3GDTN6/2x.webp');
+    assert.ok(ok(await social(`/conversations/${conversation}/media`,b)).messages.some(item=>item.id===media.id));
+    assert.equal((await social(`/conversations/${conversation}/media`,c)).status,404);
     const filtered=ok(await social(`/conversations/${conversation}/messages?kind=external_media&sender=other`,b)).messages;
     assert.ok(filtered.some(item=>item.id===media.id));
     assert.ok(filtered.every(item=>item.senderId===a && item.kind==='external_media'));
@@ -123,6 +143,20 @@ test('friends, private chat and musical sessions run in the real D1/R2/DO runtim
     assert.equal((await request(`/api/media/${encodeURIComponent(`social/${a}/${attachment.id}`)}`,null)).status,404);
     ok(await social(`/messages/${msg.id}`,a,'DELETE'));
     assert.equal((await social(`/attachments/${attachment.id}`,b)).status,404);
+  });
+  await t.test('custom emoji upload validates media and messages preserve references',async()=>{
+    const form=new FormData();form.set('name','cat_test');form.set('pack','Teste');form.set('file',new File([Uint8Array.from([137,80,78,71,13,10,26,10,0,0,0,0])],'cat.png',{type:'image/png'}));
+    const item=ok(await social('/custom-emojis',a,'POST',form));
+    assert.ok(ok(await social('/custom-emojis',b)).items.some(emoji=>emoji.id===item.id));
+    assert.equal((await social(`/custom-emojis/${item.id}`,b)).status,200);
+    const msg=ok(await social(`/conversations/${conversation}/messages`,a,'POST',{clientId:randomUUID(),kind:'custom_emoji',emojiId:item.id})).message;
+    assert.equal(msg.payload.id,item.id);
+    ok(await social(`/messages/${msg.id}/reaction`,b,'PUT',{emoji:`consona:${item.id}`}));
+    ok(await social(`/messages/${msg.id}/reaction`,b,'PUT',{emoji:'7tv:01FCY771D800007PQ2DF3GDTN6'}));
+    assert.equal(ok(await social(`/conversations/${conversation}/features`,a)).reactions.filter(reaction=>reaction.message_id===msg.id).length,2);
+    assert.equal((await social(`/custom-emojis/${item.id}`,b,'DELETE')).status,404);
+    ok(await social(`/custom-emojis/${item.id}`,a,'DELETE'));
+    assert.equal((await social(`/custom-emojis/${item.id}`,b)).status,404);
   });
   await t.test('pagination is indexed, ordered and search never leaks another conversation',async()=>{
     for(let start=0;start<120;start+=30) await db.batch(Array.from({length:30},(_,i)=>db.prepare("INSERT INTO messages(id,conversation_id,sender_id,client_id,body,created_at) VALUES(?,?,?,?,'Historical music',?)").bind(randomUUID(),conversation,a,randomUUID(),Date.now()+start+i)));
@@ -150,7 +184,47 @@ test('friends, private chat and musical sessions run in the real D1/R2/DO runtim
     assert.equal(ok(await social('/groups',c)).groups[0].unread,1);
     ok(await social(`/groups/${group}/receipt`,c,'POST',{seq:sentGroup.seq}));
     assert.equal(ok(await social('/groups',c)).groups[0].unread,0);
+    ok(await social(`/groups/${group}/messages`,a,'POST',{text:'@bob confira',clientId:randomUUID()}));
+    assert.ok(ok(await social('/state',b)).notifications.some(item=>item.kind==='group_mention'));
     assert.equal(ok(await social(`/groups/${group}/messages`,c)).messages[0].text,'Olá grupo');
+    const groupReply=ok(await social(`/groups/${group}/messages`,c,'POST',{text:'Resposta',replyTo:sentGroup.id,clientId:randomUUID()})).message;
+    assert.equal(groupReply.replyTo,sentGroup.id);
+    assert.equal((await social(`/group-messages/${sentGroup.id}/reaction`,d,'PUT',{emoji:'❤️'})).status,404);
+    ok(await social(`/group-messages/${sentGroup.id}/reaction`,c,'PUT',{emoji:'❤️'}));
+    ok(await social(`/group-messages/${sentGroup.id}/favorite`,c,'PUT',{}));
+    assert.equal(ok(await social(`/groups/${group}/features`,b)).reactions.length,1);
+    assert.equal(ok(await social(`/groups/${group}/features`,b)).marks.length,0);
+    const groupReminder=ok(await social(`/group-messages/${sentGroup.id}/reminders`,a,'POST',{dueAt:Date.now()+60000}));
+    assert.equal((await social(`/group-messages/${sentGroup.id}/reminders`,d,'POST',{dueAt:Date.now()+60000})).status,404);
+    await db.prepare('UPDATE social_group_reminders SET due_at=? WHERE id=?').bind(Date.now()-1,groupReminder.id).run();
+    const groupSocial=await mf.getDurableObjectNamespace('SOCIAL'); await groupSocial.getByName(a).scheduleReminder(Date.now());
+    await until(()=>eventsA.some(event=>event.id===`group-reminder:${groupReminder.id}`));
+    assert.equal(ok(await social(`/groups/${group}/members`,b)).members.length,3);
+    assert.equal((await social(`/groups/${group}/members`,b,'POST',{userId:d})).status,403);
+    await db.batch([db.prepare('INSERT INTO friendships(user_id,friend_id,created_at) VALUES(?,?,?)').bind(a,d,Date.now()),db.prepare('INSERT INTO friendships(user_id,friend_id,created_at) VALUES(?,?,?)').bind(d,a,Date.now())]);
+    ok(await social(`/groups/${group}/members`,a,'POST',{userId:d}));
+    assert.equal(ok(await social(`/groups/${group}/members`,d)).members.length,4);
+    assert.equal((await social(`/groups/${group}/members/${b}`,d,'DELETE')).status,403);
+    ok(await social(`/groups/${group}/members/${d}`,a,'DELETE'));
+    assert.equal((await social(`/groups/${group}/messages`,d)).status,404);
+    await db.prepare('DELETE FROM friendships WHERE (user_id=? AND friend_id=?) OR (user_id=? AND friend_id=?)').bind(a,d,d,a).run();
+    ok(await social(`/groups/${group}/typing`,a,'POST',{typing:true}));
+    await until(()=>eventsB.some(e=>e.type==='group_typing' && e.groupId===group));
+    const groupForm=new FormData();groupForm.set('file',new File(['arquivo de grupo'],'group.txt',{type:'text/plain'}));
+    const groupFile=ok(await social(`/groups/${group}/attachments`,a,'POST',groupForm));
+    assert.equal((await social(`/group-attachments/${groupFile.id}`,b)).status,403);
+    const groupFileMessage=ok(await social(`/groups/${group}/messages`,a,'POST',{clientId:randomUUID(),attachmentId:groupFile.id})).message;
+    assert.equal(groupFileMessage.attachment.name,'group.txt');
+    const groupTrack=ok(await social(`/groups/${group}/messages`,a,'POST',{clientId:randomUUID(),kind:'track',itemId:track})).message;
+    assert.equal(groupTrack.payload.id,track); assert.equal(groupTrack.kind,'track');
+    assert.equal(ok(await social(`/groups/${group}/messages?q=confira`,b)).messages[0].text,'@bob confira');
+    assert.equal(ok(await social(`/group-messages/${groupTrack.id}/location`,b)).groupId,group);
+    assert.equal((await social(`/group-messages/${groupTrack.id}/location`,d)).status,404);
+    assert.equal((await social(`/groups/${group}/messages`,a,'POST',{clientId:randomUUID(),kind:'external_media',payload:{provider:'klipy',id:'bad',type:'gif',url:'https://evil.invalid/a'}})).status,400);
+    assert.equal((await social(`/group-attachments/${groupFile.id}`,b)).status,200);
+    assert.equal((await social(`/group-attachments/${groupFile.id}`,d)).status,404);
+    ok(await social(`/group-messages/${groupFileMessage.id}`,a,'DELETE'));
+    assert.equal((await social(`/group-attachments/${groupFile.id}`,b)).status,404);
     assert.equal((await social(`/group-messages/${sentGroup.id}`,c,'PUT',{text:'alteração indevida'})).status,404);
     ok(await social(`/group-messages/${sentGroup.id}`,b,'PUT',{text:'Mensagem editada'}));
     assert.equal(ok(await social(`/groups/${group}/messages`,c)).messages[0].text,'Mensagem editada');
@@ -161,6 +235,25 @@ test('friends, private chat and musical sessions run in the real D1/R2/DO runtim
     assert.equal((await social(`/groups/${group}/messages`,b)).status,404);
     await db.prepare('DELETE FROM user_blocks WHERE user_id=? AND blocked_id=?').bind(c,b).run();
     await db.prepare('DELETE FROM friendships WHERE (user_id=? AND friend_id=?) OR (user_id=? AND friend_id=?)').bind(a,c,c,a).run();
+  });
+  await t.test('non-friend DMs require an accepted request and respect blocks',async()=>{
+    assert.equal((await social('/conversations',a,'POST',{userId:d})).status,403);
+    ok(await social('/settings',d,'PUT',{dm_requests:false}));
+    assert.equal((await social(`/dm-requests/${d}`,a,'POST',{action:'request'})).status,403);
+    ok(await social('/settings',d,'PUT',{dm_requests:true}));
+    ok(await social(`/dm-requests/${d}`,a,'POST',{action:'request'}));
+    assert.equal((await social(`/dm-requests/${a}`,c,'POST',{action:'accept'})).status,404);
+    assert.equal(ok(await social('/state',d)).dmIncoming[0].id,a);
+    assert.equal((await social('/conversations',a,'POST',{userId:d})).status,403);
+    ok(await social(`/dm-requests/${a}`,d,'POST',{action:'accept'}));
+    const eventsD=[], socketD=(await connect(d,eventsD)).ws;
+    const thread=ok(await social('/conversations',a,'POST',{userId:d})).id;
+    const msg=ok(await social(`/conversations/${thread}/messages`,a,'POST',{text:'Olá',clientId:randomUUID()})).message;
+    await until(()=>eventsD.some(event=>event.type==='message'&&event.message.id===msg.id));
+    assert.equal(ok(await social('/state',d)).dmContacts[0].id,a);
+    ok(await social(`/blocks/${a}`,d,'POST'));
+    assert.equal((await social(`/conversations/${thread}/messages`,a)).status,403);
+    ok(await social(`/blocks/${a}`,d,'DELETE')); socketD.close();
   });
   await t.test('presence, typing and repeated track position updates do not read or write D1',async()=>{
     ok(await social('/settings',a,'PUT',{show_activity:true,share_history:true}));
@@ -178,6 +271,56 @@ test('friends, private chat and musical sessions run in the real D1/R2/DO runtim
     ok(await social('/settings',a,'PUT',{presence:'online'}));
   });
   let session;
+  await t.test('Last.fm linking encrypts sessions and scrobbles once after playback threshold',async()=>{
+    assert.equal(ok(await social('/lastfm/state',a)).connected,false);
+    const auth=ok(await social('/lastfm/authorize',a,'POST',{}));
+    assert.equal(new URL(auth.url).hostname,'www.last.fm');
+    assert.equal((await social('/lastfm/connect',b,'POST',{token:auth.token})).status,403);
+    ok(await social('/lastfm/connect',a,'POST',{token:auth.token}));
+    const row=await db.prepare('SELECT * FROM social_lastfm_links WHERE user_id=?').bind(a).first();
+    assert.equal(row.username,'test-listener');assert.ok(!row.ciphertext.includes('test-private-session'));
+    assert.equal(ok(await social('/lastfm/state',a)).connected,true);
+    const data={trackId:track,clientId:randomUUID(),startedAt:Date.now()-130000,playedSeconds:120};
+    assert.equal((await social('/lastfm/scrobble',a,'POST',{...data,playedSeconds:10})).status,400);
+    assert.equal(ok(await social('/lastfm/scrobble',a,'POST',data)).ok,true);
+    assert.equal(ok(await social('/lastfm/scrobble',a,'POST',data)).duplicate,true);
+    assert.equal((await social('/lastfm/scrobble',b,'POST',{...data,clientId:randomUUID()})).status,404);
+    ok(await social('/lastfm/link',a,'DELETE'));assert.equal(ok(await social('/lastfm/state',a)).connected,false);
+  });
+  await t.test('repeated text spam is limited without blocking idempotent retries',async()=>{
+    const payload={text:'Mensagem repetida para teste',clientId:randomUUID()};
+    const first=ok(await social(`/conversations/${conversation}/messages`,a,'POST',payload)).message;
+    for(let i=0;i<6;i++) assert.equal(ok(await social(`/conversations/${conversation}/messages`,a,'POST',payload)).message.id,first.id);
+    for(let i=0;i<4;i++) ok(await social(`/conversations/${conversation}/messages`,a,'POST',{...payload,clientId:randomUUID()}));
+    assert.equal((await social(`/conversations/${conversation}/messages`,a,'POST',{...payload,clientId:randomUUID()})).status,429);
+  });
+  await t.test('collaborative playlists enforce editor rights and preserve friendship boundaries',async()=>{
+    const playlist=randomUUID();await db.prepare("INSERT INTO playlists(id,name,added_by) VALUES(?,'Compartilhada',?)").bind(playlist,a).run();
+    assert.equal((await social(`/playlists/${playlist}/collaborators`,c,'POST',{userId:b})).status,403);
+    ok(await social(`/playlists/${playlist}/collaborators`,a,'POST',{userId:b}));
+    assert.equal(ok(await social(`/playlists/${playlist}/collaborators`,a)).members[0].id,b);
+    assert.equal((await request(`/api/playlists/${playlist}/tracks`,c,'POST',{trackIds:[track]})).status,403);
+    ok(await request(`/api/playlists/${playlist}/tracks`,b,'POST',{trackIds:[track]}));
+    assert.equal((await request(`/api/playlists/${playlist}`,b,'DELETE')).status,403);
+    ok(await social(`/playlists/${playlist}/collaborators/${b}`,a,'DELETE'));
+    assert.equal((await request(`/api/playlists/${playlist}/tracks`,b,'POST',{trackIds:[track]})).status,403);
+    ok(await request(`/api/playlists/${playlist}`,a,'DELETE'));
+  });
+  await t.test('music compatibility requires mutual consent and friendship',async()=>{
+    assert.equal((await social(`/profiles/${b}/compatibility`,a)).status,403);
+    await db.prepare('INSERT INTO user_favorites(user_id,track_id) VALUES(?,?),(?,?)').bind(a,track,b,track).run();
+    assert.equal(ok(await social(`/profiles/${a}`,c)).favorites.length,0);
+    ok(await social('/settings',a,'PUT',{public_music_profile:true}));
+    assert.equal(ok(await social(`/profiles/${a}`,c)).favorites[0].id,track);
+    ok(await social('/settings',a,'PUT',{public_music_profile:false}));
+    ok(await social('/settings',a,'PUT',{share_favorites:true}));
+    assert.equal((await social(`/profiles/${b}/compatibility`,a)).status,403);
+    ok(await social('/settings',b,'PUT',{share_favorites:true}));
+    const match=ok(await social(`/profiles/${b}/compatibility`,a));
+    assert.equal(match.commonCount,1); assert.equal(match.compatibility,100); assert.equal(match.commonTracks[0].id,track);
+    assert.equal((await social(`/profiles/${b}/compatibility`,c)).status,403);
+    ok(await social('/settings',a,'PUT',{share_favorites:false}));ok(await social('/settings',b,'PUT',{share_favorites:false}));
+  });
   await t.test('listening requires consent and only the host controls playback by default',async()=>{
     session=ok(await social('/listen',a,'POST',{userId:b,trackId:track})).session;
     assert.equal((await social(`/listen/${session.id}`,c,'POST')).status,409);
@@ -205,6 +348,8 @@ test('friends, private chat and musical sessions run in the real D1/R2/DO runtim
     await until(()=>eventsA.some(e=>e.type==='social_changed'&&e.removed?.includes(b)));
     ok(await social(`/blocks/${a}`,b,'DELETE'));
     assert.deepEqual(ok(await social('/state',b)).friends,[]);
+    const history=ok(await social('/listen/history',a)).sessions.find(item=>item.id===session.id);
+    assert.ok(history.startedAt && history.endedAt); assert.ok(history.tracks.length>=2);
   });
   await t.test('logout revokes a live socket and old session authentication',async()=>{
     const unused=ok(await social('/ticket',a,'POST'));

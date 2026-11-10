@@ -1,4 +1,18 @@
 import worker, { SocialUser, ListeningSession } from '../src/index.js';
+import { createHash } from 'node:crypto';
+const nativeFetch=globalThis.fetch;
+globalThis.fetch=async (input,init)=>{
+  const url=new URL(typeof input==='string'?input:input.url);
+  if(url.hostname!=='ws.audioscrobbler.com')return nativeFetch(input,init);
+  const params=init?.body instanceof URLSearchParams?new URLSearchParams(init.body):new URLSearchParams(url.search);
+  const signature=params.get('api_sig');params.delete('api_sig');params.delete('format');
+  const source=[...params.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([key,value])=>key+value).join('')+'test-lastfm-secret';
+  if(signature!==createHash('md5').update(source).digest('hex'))return Response.json({error:13},{status:400});
+  if(params.get('method')==='auth.getToken')return Response.json({token:'f'.repeat(32)});
+  if(params.get('method')==='auth.getSession')return Response.json({session:{name:'test-listener',key:'test-private-session'}});
+  if(params.get('method')==='track.scrobble' && params.get('sk')==='test-private-session')return Response.json({scrobbles:{'@attr':{accepted:'1',ignored:'0'}}});
+  return Response.json({error:9},{status:400});
+};
 export { ListeningSession };
 export class MeasuredSocialUser extends SocialUser {
   constructor(ctx, env) {

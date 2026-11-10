@@ -426,7 +426,7 @@ async function route(request, env, ctx) {
   const authResponse = await authRoutes(request, env, path);
   if (authResponse) return authResponse;
   const user = await getUser(request, env);
-  if (path.startsWith('/api/social/')) return socialRoutes(request, env, user, { json, responseHeaders });
+  if (path.startsWith('/api/social/')) return socialRoutes(request, env, user, { json, responseHeaders, ctx });
   if (path === '/api/import/tracks' && request.method === 'POST') return user ? uploadTrack(request, env, user, true) : fail(request, 'Entre na sua conta para importar músicas.', 401);
   const importResponse = await importRoutes(request, env, user, { json, fail, approvedImageUrl, mediaUrl, ctx });
   if (importResponse) return importResponse;
@@ -555,12 +555,16 @@ async function route(request, env, ctx) {
   const playlistMatch = path.match(/^\/api\/playlists\/([^/]+)$/);
   if (playlistMatch && request.method === 'DELETE') {
     if (!user) return fail(request, 'Entre na sua conta para excluir playlists.', 401);
+    const collab=await env.DB.prepare('SELECT owner_id FROM social_collaborative_playlists WHERE playlist_id=?').bind(playlistMatch[1]).first();
+    if(collab && collab.owner_id!==user.id) return fail(request,'Somente o criador pode excluir esta playlist.',403);
     await env.DB.prepare('DELETE FROM playlists WHERE id = ?').bind(playlistMatch[1]).run();
     return json(request, { ok: true });
   }
   const playlistTrackMatch = path.match(/^\/api\/playlists\/([^/]+)\/tracks$/);
   if (playlistTrackMatch && request.method === 'POST') {
     if (!user) return fail(request, 'Entre na sua conta para editar playlists.', 401);
+    const access=await env.DB.prepare(`SELECT c.owner_id,EXISTS(SELECT 1 FROM social_playlist_collaborators m WHERE m.playlist_id=c.playlist_id AND m.user_id=? AND EXISTS(SELECT 1 FROM friendships f WHERE f.user_id=c.owner_id AND f.friend_id=m.user_id) AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.user_id=c.owner_id AND b.blocked_id=m.user_id) OR (b.user_id=m.user_id AND b.blocked_id=c.owner_id))) AS can_edit FROM social_collaborative_playlists c WHERE c.playlist_id=?`).bind(user.id,playlistTrackMatch[1]).first();
+    if(access && access.owner_id!==user.id && !access.can_edit) return fail(request,'Você não é colaborador desta playlist.',403);
     const payload = await request.json();
     const trackIds = Array.isArray(payload.trackIds) ? [...new Set(payload.trackIds.map(String))].slice(0, 500) : [String(payload.trackId || '')];
     const statements = trackIds.filter(Boolean).map((id, position) => env.DB.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) SELECT ?, id, (SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?) + ? FROM tracks WHERE id = ?').bind(playlistTrackMatch[1], playlistTrackMatch[1], position, id));
